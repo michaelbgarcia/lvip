@@ -1,0 +1,6 @@
+# Core
+PyMuPDF>=1.24        # PDF text + annotation extraction (fitz)
+pandas>=2.0          # CSV / tabular export
+
+# Dev
+pytest>=8.0

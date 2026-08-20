@@ -1,0 +1,9 @@
+[project]
+name = "acrf-parser"
+version = "0.1.0"
+description = "Deterministic parser for annotated Case Report Forms (aCRF)"
+requires-python = ">=3.10"
+dependencies = ["PyMuPDF>=1.24", "pandas>=2.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
