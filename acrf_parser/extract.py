@@ -11,10 +11,14 @@ from typing import Any
 
 import pymupdf
 
-from .models import Annotation, BBox, Document, Page, TextBlock, TextLine, Word
+from . import layout
+from .models import (Annotation, BBox, Control, Document, Page, Rule, TextBlock,
+                     TextLine, Word)
 from .normalize import clean
 
-_BOLD_FLAG = 1 << 4  # span flags bit for bold
+_BOLD_FLAG = 1 << 4     # span flags bit for bold
+_RULE_MAX_THICK = 2.0   # a filled rect this thin is a ruled line, not a box
+_CTRL_MIN_SIDE = 4.0    # smaller than this is decoration, not an input control
 
 
 class ACRFParser:
@@ -33,6 +37,7 @@ class ACRFParser:
             if doc.needs_pass:
                 raise ValueError(f"{self.path.name} is password protected")
             pages = [self._parse_page(p) for p in doc]
+            layout.analyze_document(pages)      # needs every page: running headers
             self.document = Document(
                 path=str(self.path),
                 page_count=doc.page_count,
@@ -54,8 +59,34 @@ class ACRFParser:
         out.blocks, out.lines = self._blocks_and_lines(page)
         out.words = self._words(page)
         out.annotations = self._annotations(page)
+        out.rules, out.controls = self._graphics(page)
         self._tag_annotation_text(out)
-        return out
+        return out                   # layout pass runs document-wide in parse_pdf
+
+    def _graphics(self, page: pymupdf.Page) -> tuple[list[Rule], list[Control]]:
+        """Split vector drawings into separators (rules) and response controls.
+
+        Rules stop line grouping running across section boundaries; controls are
+        the evidence that a column holds responses rather than questions.
+        """
+        rules: list[Rule] = []
+        controls: list[Control] = []
+        w, h = page.rect.width or 1.0, page.rect.height or 1.0
+        for d in page.get_drawings():
+            box = BBox.of(d["rect"])
+            kinds = {it[0] for it in d.get("items", [])}
+            if box.height <= _RULE_MAX_THICK and box.width > _CTRL_MIN_SIDE:
+                rules.append(Rule(page.number + 1, box, "H", round(box.width / w, 4)))
+            elif box.width <= _RULE_MAX_THICK and box.height > _CTRL_MIN_SIDE:
+                rules.append(Rule(page.number + 1, box, "V", round(box.height / h, 4)))
+            elif box.width >= _CTRL_MIN_SIDE and box.height >= _CTRL_MIN_SIDE:
+                kind = "CIRCLE" if "c" in kinds else "BOX"
+                controls.append(Control(page.number + 1, box, kind))
+        for wd in page.widgets():    # AcroForm fields; annots() excludes these
+            controls.append(Control(page.number + 1, BBox.of(wd.rect), "WIDGET",
+                                    widget_type=str(wd.field_type_string or ""),
+                                    field_name=str(wd.field_name or "")))
+        return rules, controls
 
     @staticmethod
     def _tag_annotation_text(page: Page, min_frac: float = 0.6) -> None:
@@ -170,6 +201,11 @@ def summarize(doc: Document) -> dict[str, Any]:
         "words": sum(len(p.words) for p in doc.pages),
         "annotations": sum(len(p.annotations) for p in doc.pages),
         "content_lines": sum(len(p.content_lines) for p in doc.pages),
+        "groups": sum(len(p.groups) for p in doc.pages),
+        "wrapped_groups": sum(1 for p in doc.pages for g in p.groups if g.line_count > 1),
+        "columns_per_page": [len(p.column_bands) for p in doc.pages],
+        "rules": sum(len(p.rules) for p in doc.pages),
+        "controls": sum(len(p.controls) for p in doc.pages),
         "pages_without_text": [p.number for p in doc.pages if not p.text.strip()],
         "pages_without_annotations": [p.number for p in doc.pages if not p.annotations],
     }

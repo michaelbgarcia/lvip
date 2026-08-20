@@ -116,10 +116,78 @@ class TextLine:
     font: str = ""             # dominant font name
     bold: bool = False
     from_annotation: bool = False
+    region: str = ""           # HEADER | BODY | FOOTER (set by layout pass)
+    column: int | None = None  # index into Page.column_bands
+    group_id: int | None = None
 
     @property
     def normalized_text(self) -> str:
         return normalize(self.text)
+
+
+@dataclass
+class Rule:
+    """A ruled line: section separator or table border."""
+    page: int
+    bbox: BBox
+    orientation: str           # H | V
+    span_pct: float            # length as fraction of page width (H) or height (V)
+
+
+@dataclass
+class Control:
+    """A response control: answer box, checkbox/radio circle, fill-in rule, AcroForm widget."""
+    page: int
+    bbox: BBox
+    kind: str                  # BOX | CIRCLE | WIDGET
+    widget_type: str = ""      # AcroForm field type, WIDGET only
+    field_name: str = ""
+
+
+@dataclass
+class ColumnBand:
+    """A vertical band of the page body found by gutter detection."""
+    index: int
+    x0: float
+    x1: float
+    role_hint: str = "UNKNOWN"  # QUESTION_ZONE | RESPONSE_ZONE | UNKNOWN
+
+    def contains(self, bbox: BBox, min_frac: float = 0.5) -> bool:
+        span = min(self.x1, bbox.x1) - max(self.x0, bbox.x0)
+        return bbox.width <= 0 or span / bbox.width >= min_frac
+
+
+@dataclass
+class TextGroup:
+    """One logical label: rendered lines merged back into the text a human reads.
+
+    A wrapped question ("Please record / protocol / version on / ...") is six
+    TextLines but one TextGroup. Constituent lines are kept so every merge is auditable.
+    """
+    page: int
+    text: str
+    bbox: BBox
+    lines: list[TextLine] = field(default_factory=list)
+    region: str = ""
+    column: int | None = None
+    size: float = 0.0
+    bold: bool = False
+    block_ids: list[int] = field(default_factory=list)
+    role: str = "UNKNOWN"      # QUESTION | RESPONSE_OPTION | SECTION_HEADER | PAGE_HEADER | FOOTER
+    role_confidence: float = 0.0
+    role_evidence: list[str] = field(default_factory=list)
+
+    @property
+    def normalized_text(self) -> str:
+        return normalize(self.text)
+
+    @property
+    def line_count(self) -> int:
+        return len(self.lines)
+
+    def from_annotation_only(self) -> bool:
+        """Group is annotation markup, not a CRF label."""
+        return bool(self.lines) and all(l.from_annotation for l in self.lines)
 
 
 @dataclass
@@ -154,10 +222,20 @@ class Page:
     lines: list[TextLine] = field(default_factory=list)
     words: list[Word] = field(default_factory=list)
     annotations: list[Annotation] = field(default_factory=list)
+    rules: list[Rule] = field(default_factory=list)
+    controls: list[Control] = field(default_factory=list)
+    # filled by the layout pass
+    groups: list[TextGroup] = field(default_factory=list)
+    column_bands: list[ColumnBand] = field(default_factory=list)
+    body_top: float = 0.0
+    body_bottom: float = 0.0
 
     @property
     def normalized_text(self) -> str:
         return normalize(self.text)
+
+    def groups_by_role(self, role: str) -> list[TextGroup]:
+        return [g for g in self.groups if g.role == role]
 
     # Page-body text only: annotation markup stripped out (PyMuPDF folds
     # annotation appearance text into page text). Phase 3 reads this.
@@ -192,9 +270,18 @@ class Document:
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-ready dict; BBox becomes a 4-list."""
-        def enc(o):
+        def enc(o) -> Any:
             if isinstance(o, BBox):
                 return list(o.as_tuple())
+            if isinstance(o, TextGroup):     # compact line refs, not full copies
+                d = {f.name: enc(getattr(o, f.name)) for f in fields(o) if f.name != "lines"}
+                d["lines"] = [{"block_no": l.block_no, "line_no": l.line_no,
+                               "text": l.text, "bbox": list(l.bbox.as_tuple())} for l in o.lines]
+                d["normalized_text"], d["line_count"] = o.normalized_text, o.line_count
+                page = self.page(o.page)
+                if page:            # templates key off relative position, not points
+                    d["relative"] = o.bbox.relative(page.width, page.height)
+                return d
             if is_dataclass(o):
                 return {f.name: enc(getattr(o, f.name)) for f in fields(o)}
             if isinstance(o, dict):

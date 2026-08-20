@@ -41,6 +41,36 @@ PAGES = [
 ]
 
 
+# Page 4 reproduces a real Disposition page: a wrapped 6-line question in the
+# left column, radio options in the right column, rules bounding the body, and
+# an annotation sitting in the gutter between the columns.
+WRAP_LINES = ["Please record", "protocol", "version on", "which subject",
+              "is currently", "enrolled:"]
+OPTIONS = ["Original", "Amendment 1", "Amendment 2", "Amendment 3", "Amendment 4"]
+
+
+def _disposition_page(doc: pymupdf.Document) -> None:
+    page = doc.new_page()
+    page.insert_text((60, 60), "Version", fontsize=10, fontname="hebo")
+    page.insert_text((60, 76), "Generated On: 15 Nov 2024 18:35:29", fontsize=10, fontname="hebo")
+    page.draw_line(pymupdf.Point(55, 92), pymupdf.Point(540, 92))     # body top rule
+
+    for i, txt in enumerate(WRAP_LINES):                              # 12pt pitch = wrapped
+        page.insert_text((60, 112 + i * 12), txt, fontsize=10)
+    for i, txt in enumerate(OPTIONS):                                 # 20pt pitch = distinct
+        page.insert_text((430, 112 + i * 20), txt, fontsize=10)
+        page.draw_circle(pymupdf.Point(515, 108 + i * 20), 5)         # radio control
+
+    page.draw_line(pymupdf.Point(55, 216), pymupdf.Point(540, 216))   # body bottom rule
+    for text, rect in (
+        ("DS=Disposition", pymupdf.Rect(60, 20, 240, 40)),
+        ('SUPPDS.QVAL when QNAM = "PROTVER"', pymupdf.Rect(250, 130, 420, 160)),  # in gutter
+    ):
+        a = page.add_freetext_annot(rect, text, fontsize=9, text_color=RED)
+        a.set_info(content=text, title="annotator")
+        a.update()
+
+
 def build(path: str | Path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -57,6 +87,7 @@ def build(path: str | Path) -> Path:
             a = page.add_freetext_annot(rect, text, fontsize=8, text_color=RED)
             a.set_info(content=text, title="annotator")
             a.update()
+    _disposition_page(doc)
     doc.save(path)
     doc.close()
     return path
