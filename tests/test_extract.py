@@ -3,12 +3,7 @@ import json
 
 import pytest
 
-from acrf_parser import ACRFParser, BBox, dump_json, parse_pdf, summarize
-
-
-@pytest.fixture(scope="session")
-def doc(sample_pdf):
-    return parse_pdf(sample_pdf)
+from acrf_parser import ACRFParser, BBox, dump_json, summarize
 
 
 def test_pages_and_dimensions(doc):

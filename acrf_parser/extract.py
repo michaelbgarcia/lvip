@@ -11,7 +11,9 @@ from typing import Any
 
 import pymupdf
 
-from . import layout
+from . import annotations as annots
+from . import fields as flds
+from . import forms, layout, linking
 from .models import (Annotation, BBox, Control, Document, Page, Rule, TextBlock,
                      TextLine, Word)
 from .normalize import clean
@@ -44,6 +46,10 @@ class ACRFParser:
                 metadata={k: v for k, v in (doc.metadata or {}).items() if v},
                 pages=pages,
             )
+            self.document.forms = forms.detect_forms(pages)   # Phase 2
+            flds.extract_fields(pages)                        # Phase 3
+            annots.extract_annotations(pages)                 # Phases 4-5
+            linking.link_document(self.document)              # Phase 6
         return self.document
 
     # ---- per-page work ----------------------------------------------------
@@ -195,6 +201,10 @@ def summarize(doc: Document) -> dict[str, Any]:
     """Quick counts for sanity-checking an extraction run."""
     return {
         "file": Path(doc.path).name,
+        "forms": forms.summarize_forms(doc.forms),
+        **flds.summarize_fields(list(doc.iter_fields())),
+        **annots.summarize_annotations(list(doc.iter_annotations())),
+        **linking.summarize_links(doc),
         "pages": doc.page_count,
         "blocks": sum(len(p.blocks) for p in doc.pages),
         "lines": sum(len(p.lines) for p in doc.pages),

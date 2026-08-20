@@ -1,15 +1,10 @@
 """Layout pass tests: wrapped-line grouping, columns, regions, roles."""
 import pytest
 
-from acrf_parser import layout, parse_pdf
+from acrf_parser import layout
 from acrf_parser.models import BBox, ColumnBand, Control, Page, Rule, TextLine
 
 WRAPPED = "Please record protocol version on which subject is currently enrolled:"
-
-
-@pytest.fixture(scope="session")
-def doc(sample_pdf):
-    return parse_pdf(sample_pdf)
 
 
 @pytest.fixture(scope="session")

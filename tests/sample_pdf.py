@@ -137,5 +137,37 @@ def build(path: str | Path) -> Path:
     return path
 
 
+# A second, unrelated study. Its Adverse Events form has a "Start Date" field
+# too - mapping to AESTDTC, not MHSTDTC. Two studies in one knowledge base is
+# what makes the (form_name, field_text) key testable rather than merely stated.
+SECOND_STUDY = [
+    ("Form: Adverse Events",
+     [("Adverse event", 120), ("Start Date", 150), ("Stop Date", 180)],
+     [("AE=Adverse Events", 330, 88), ("AETERM", 330, 118),
+      ("AESTDTC", 330, 148), ("AEENDTC", 330, 178)]),
+]
+
+
+def build_second_study(path: str | Path) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = pymupdf.open()
+    for title, fields, annots in SECOND_STUDY:
+        page = doc.new_page()
+        page.insert_text((60, 60), "STUDY ABC-999", fontsize=9)
+        page.insert_text((60, 88), title, fontsize=13, fontname="hebo")
+        for label, y in fields:
+            page.insert_text((60, y), label, fontsize=10)
+            page.draw_rect(pymupdf.Rect(180, y - 11, 300, y + 4))
+        for text, x, y in annots:
+            a = page.add_freetext_annot(pymupdf.Rect(x, y - 12, x + 210, y + 4),
+                                        text, fontsize=8, text_color=RED)
+            a.set_info(content=text, title="annotator")
+            a.update()
+    doc.save(path)
+    doc.close()
+    return path
+
+
 if __name__ == "__main__":
     print(build(Path(__file__).resolve().parents[1] / "data" / "sample_acrf.pdf"))

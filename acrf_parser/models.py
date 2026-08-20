@@ -191,6 +191,21 @@ class TextGroup:
 
 
 @dataclass
+class AnnotationPart:
+    """One markup statement. An annotation box often holds several ("AESTDTC
+    AEENDTC"), and each is classified on its own."""
+    text: str
+    annot_type: str = ""
+    parsed: dict[str, Any] = field(default_factory=dict)
+    confidence: float = 0.0
+    evidence: list[str] = field(default_factory=list)
+
+    @property
+    def normalized_text(self) -> str:
+        return normalize(self.text)
+
+
+@dataclass
 class Annotation:
     """A PDF annotation object - the SDTM markup layer (Phases 4-5)."""
     page: int
@@ -202,12 +217,107 @@ class Annotation:
     title: str = ""                   # annot /T (author field)
     color: tuple[float, ...] | None = None
     xref: int = 0
+    id: str = ""                      # stable within a document: p<page>a<index>
     annot_type: str = ""              # Phase 5 classification, filled later
     parsed: dict[str, Any] = field(default_factory=dict)  # Phase 5 payload
+    type_confidence: float = 0.0
+    type_evidence: list[str] = field(default_factory=list)
+    parts: list[AnnotationPart] = field(default_factory=list)
+    form_name: str = ""
 
     @property
     def normalized_text(self) -> str:
         return normalize(self.text)
+
+
+@dataclass
+class CrossReference:
+    """A "See Page 7" pointer: this page's markup lives on another page."""
+    page: int
+    target_page: int
+    text: str
+    bbox: BBox
+    resolved: bool = False      # target page exists in this document
+    target_form: str = ""
+
+
+@dataclass
+class Form:
+    """One CRF form, possibly spanning several pages (Phase 2)."""
+    name: str
+    pages: list[int] = field(default_factory=list)
+    domain: str = ""                  # SDTM domain code (DM, MH, ...) when known
+    raw_titles: list[str] = field(default_factory=list)
+    source: str = ""                  # TITLE_LINE | DOMAIN_ANNOTATION | CROSS_REFERENCE | INHERITED
+    confidence: float = 0.0
+    evidence: list[str] = field(default_factory=list)
+    continuation_pages: list[int] = field(default_factory=list)
+    cross_references: list[CrossReference] = field(default_factory=list)
+
+    @property
+    def normalized_name(self) -> str:
+        return normalize(self.name)
+
+    @property
+    def first_page(self) -> int:
+        return min(self.pages) if self.pages else 0
+
+
+@dataclass
+class ResponseOption:
+    """One choice in a field's codelist ("Amendment 1"), kept with its geometry
+    because an option can carry markup of its own."""
+    text: str
+    bbox: BBox
+    group_id: int | None = None
+
+    @property
+    def normalized_text(self) -> str:
+        return normalize(self.text)
+
+
+@dataclass
+class Field:
+    """One CRF question: the left half of the (form_name, field_text) key (Phase 3)."""
+    id: str                           # stable within a document: p<page>f<index>
+    form_name: str
+    page: int
+    text: str                         # label, numbering and trailing colon removed
+    raw_text: str                     # exactly as printed, wrapped lines rejoined
+    bbox: BBox
+    group_id: int | None = None
+    column: int | None = None
+    role: str = ""
+    section: str = ""                 # enclosing section header, when there is one
+    item_number: str = ""             # "1." / "a)" / "" - stripped off `text`
+    options: list[ResponseOption] = field(default_factory=list)
+    control_kinds: list[str] = field(default_factory=list)
+    confidence: float = 0.0
+    evidence: list[str] = field(default_factory=list)
+
+    @property
+    def option_texts(self) -> list[str]:
+        return [o.text for o in self.options]
+
+    @property
+    def normalized_text(self) -> str:
+        return normalize(self.text)
+
+    @property
+    def key(self) -> tuple[str, str]:
+        """Primary key. Never field text alone - "Start Date" is domain-dependent."""
+        return (normalize(self.form_name), self.normalized_text)
+
+
+@dataclass
+class Link:
+    """A scored field <-> annotation association (Phase 6)."""
+    field_id: str
+    annotation_id: str
+    page: int
+    link_score: float
+    evidence: list[str] = field(default_factory=list)
+    rejected: bool = False            # kept for audit: scored but lost to a better link
 
 
 @dataclass
@@ -229,6 +339,15 @@ class Page:
     column_bands: list[ColumnBand] = field(default_factory=list)
     body_top: float = 0.0
     body_bottom: float = 0.0
+    # filled by Phase 2 / 3
+    form_name: str = ""
+    form_domain: str = ""
+    form_source: str = ""             # TITLE_LINE | SECTION_HEADER | DOMAIN_ANNOTATION | ...
+    is_continuation: bool = False
+    form_confidence: float = 0.0
+    form_evidence: list[str] = field(default_factory=list)
+    cross_references: list[CrossReference] = field(default_factory=list)
+    fields: list[Field] = field(default_factory=list)
 
     @property
     def normalized_text(self) -> str:
@@ -259,6 +378,8 @@ class Document:
     page_count: int
     metadata: dict[str, Any] = field(default_factory=dict)
     pages: list[Page] = field(default_factory=list)
+    forms: list[Form] = field(default_factory=list)
+    links: list[Link] = field(default_factory=list)
 
     def page(self, number: int) -> Page | None:
         """1-based page lookup."""
@@ -267,6 +388,26 @@ class Document:
     def iter_annotations(self) -> Iterator[Annotation]:
         for p in self.pages:
             yield from p.annotations
+
+    def iter_fields(self) -> Iterator[Field]:
+        for p in self.pages:
+            yield from p.fields
+
+    def form(self, name: str) -> Form | None:
+        """Look a form up by name, normalized so "Form: Demographics" matches."""
+        key = normalize(name)
+        return next((f for f in self.forms if f.normalized_name == key), None)
+
+    def annotation(self, annot_id: str) -> Annotation | None:
+        return next((a for a in self.iter_annotations() if a.id == annot_id), None)
+
+    def field(self, field_id: str) -> Field | None:
+        return next((f for f in self.iter_fields() if f.id == field_id), None)
+
+    def links_for(self, field_id: str) -> list[Link]:
+        """Accepted links for one field, best score first."""
+        return sorted((l for l in self.links if l.field_id == field_id and not l.rejected),
+                      key=lambda l: -l.link_score)
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-ready dict; BBox becomes a 4-list."""
