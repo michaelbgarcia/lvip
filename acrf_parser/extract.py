@@ -139,6 +139,7 @@ class ACRFParser:
         except Exception:
             return ""
 
+    @staticmethod
     def _annot_color(a: pymupdf.Annot) -> tuple[float, ...] | None:
         colors = a.colors or {}
         c = colors.get("stroke") or colors.get("fill")
