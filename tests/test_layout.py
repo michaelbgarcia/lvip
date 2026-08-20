@@ -54,6 +54,47 @@ def test_split_annotation_is_rejoined(ds):
     assert g.from_annotation_only()
 
 
+# --- right-aligned criteria page (uniform pitch, checkbox-anchored items) ---
+@pytest.fixture(scope="session")
+def elig(doc):
+    return doc.page(5)
+
+
+def test_grouping_ignores_muPDF_block_splits(elig):
+    """MuPDF splits a single criterion across blocks; grouping must not follow it.
+
+    Criterion 1 arrives as blocks [2, 3] - the exact split seen in a real aCRF -
+    and criterion 3 spans four blocks. Both are one label.
+    """
+    one = next(g for g in elig.groups if g.text.startswith("1."))
+    assert len(one.block_ids) > 1                     # MuPDF really did split it
+    assert one.text == ("1. Have hypochondroplasia or short stature condition "
+                        "other than ACH (e.g., trisomy 21, pseudoachondroplasia)")
+    three = next(g for g in elig.groups if g.text.startswith("3."))
+    assert len(three.block_ids) > 1 and three.line_count == 8
+
+
+def test_uniform_pitch_items_split_on_numbering_and_checkbox(elig):
+    """Pitch is identical within and between items, so only numbering and the
+    checkboxes mark the boundaries."""
+    items = [g for g in elig.groups if g.role == layout.QUESTION]
+    assert len(items) == 4
+    assert [g.text[:2] for g in items] == ["1.", "2.", "3.", "4."]
+
+
+def test_mid_item_colon_does_not_split(elig):
+    """"2. Have any of the following:" continues into its semicolon list."""
+    two = next(g for g in elig.groups if g.text.startswith("2."))
+    assert two.line_count == 7
+    assert two.text.endswith("Inflammatory bowel disease; Autonomic neuropathy")
+
+
+def test_cross_reference_annotation_kept_separate(elig):
+    assert any(a.text == "See Page 7" for a in elig.annotations)
+    g = next(g for g in elig.groups if g.text == "See Page 7")
+    assert g.from_annotation_only() and g.role == layout.UNKNOWN
+
+
 # --- columns ---------------------------------------------------------------
 def test_two_column_split_detected(ds):
     assert len(ds.column_bands) == 2
@@ -131,10 +172,11 @@ def _line(text, x0, y0, x1, y1, size=10.0, col=0, block=0):
                     line_no=0, size=size, region=layout.BODY, column=col)
 
 
-def _page(**kw):
+def _page(*lines, **kw):
     p = Page(number=1, width=595, height=842, rotation=0, text="")
     p.column_bands = kw.get("bands", [ColumnBand(0, 0, 300), ColumnBand(1, 400, 595)])
     p.rules, p.controls = kw.get("rules", []), kw.get("controls", [])
+    p.lines = list(lines)                # anchors are derived from the page's lines
     return p
 
 
@@ -169,12 +211,26 @@ def test_merge_predicate_rule_between():
 
 
 def test_merge_predicate_control_is_band_scoped():
-    """A control in the line's own band ends the label; one across the gutter does not."""
+    """A control in the line's own band starts a new field; one across the gutter does not."""
     a, b = _line("line one", 60, 100, 150, 113), _line("line two", 60, 112, 150, 125)
-    own = Control(1, BBox.of((170, 110, 200, 126)), "BOX")        # band 0, adjacent
+    own = Control(1, BBox.of((170, 110, 200, 126)), "BOX")        # band 0, adjacent to b
     across = Control(1, BBox.of((500, 110, 510, 120)), "CIRCLE")  # band 1, far right
-    assert not layout._mergeable(a, b, _page(controls=[own]))
-    assert layout._mergeable(a, b, _page(controls=[across]))
+    assert not layout._mergeable(a, b, _page(a, b, controls=[own]))
+    assert layout._mergeable(a, b, _page(a, b, controls=[across]))
+
+
+def test_control_anchors_only_the_topmost_line():
+    """A control level with a whole wrapped label anchors line 1, not every line.
+
+    Otherwise a tall checkbox beside a three-line question would split it in two.
+    """
+    a = _line("first line", 60, 100, 150, 113)
+    b = _line("second line", 60, 112, 150, 125)
+    tall = Control(1, BBox.of((170, 98, 200, 128)), "BOX")        # spans both rows
+    p = _page(a, b, controls=[tall])
+    anchors = layout._anchor_ids(p)
+    assert id(a) in anchors and id(b) not in anchors
+    assert layout._mergeable(a, b, p)                             # so the label survives
 
 
 def test_merge_predicate_punctuation():

@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 from statistics import median
 
-from .models import BBox, ColumnBand, Page, TextGroup, TextLine
+from .models import BBox, ColumnBand, Control, Page, TextGroup, TextLine
 
 # --- tunables (calibrate against a real aCRF before trusting on new studies) ---
 GAP_RATIO = 0.5          # merge when line gap <= this * font size
@@ -36,6 +36,7 @@ PAGE_HEADER, FOOTER_ROLE, UNKNOWN = "PAGE_HEADER", "FOOTER", "UNKNOWN"
 
 _NEW_ITEM = re.compile(r"^\s*(\d+[.)]|[a-z][.)]|[-•*])\s+", re.I)
 _TERMINATED = re.compile(r"[:?]\s*$")
+_LIST_CONT = re.compile(r"[;,]\s*$")   # line ends mid-list, so the label continues
 
 
 def analyze_document(pages: list[Page]) -> list[Page]:
@@ -188,11 +189,12 @@ def _hint_zones(page: Page) -> None:
 def group_lines(page: Page) -> list[TextGroup]:
     """Merge rendered lines back into logical labels, one group per label."""
     groups: list[TextGroup] = []
+    anchors = _anchor_ids(page)
     lines = sorted((l for l in page.lines if l.text.strip()),
                    key=lambda l: (l.column if l.column is not None else -1, l.bbox.y0, l.bbox.x0))
     current: list[TextLine] = []
     for line in lines:
-        if current and _mergeable(current[-1], line, page):
+        if current and _mergeable(current[-1], line, page, anchors):
             current.append(line)
         else:
             if current:
@@ -203,19 +205,25 @@ def group_lines(page: Page) -> list[TextGroup]:
     return groups
 
 
-def _mergeable(a: TextLine, b: TextLine, page: Page) -> bool:
+def _mergeable(a: TextLine, b: TextLine, page: Page, anchors: set[int] | None = None) -> bool:
     """Is `b` a wrapped continuation of `a`? All conditions must hold."""
+    if anchors is None:
+        anchors = _anchor_ids(page)
     if a.page != b.page or a.region != b.region or a.column != b.column:
         return False
     if a.from_annotation != b.from_annotation:
         return False
     if a.region != BODY and not a.from_annotation:
         return False    # header/footer metadata is parsed by regex, not read as prose
-    if _TERMINATED.search(a.text) or _NEW_ITEM.match(b.text):
+    if id(b) in anchors:             # b has its own answer control -> b starts a field
+        return False
+    if _NEW_ITEM.match(b.text):
+        return False
+    # A trailing colon ends a label ("...currently enrolled:") unless what follows is
+    # a list continuation ("Have any of the following:" / "Hypo/hyper-thyroidism;").
+    if _TERMINATED.search(a.text) and not _LIST_CONT.search(b.text):
         return False
     if _rule_between(a, b, page):
-        return False
-    if _own_control(b, page):        # b has its own answer box -> b is a field, not a wrap
         return False
     same_block = a.block_no == b.block_no and not a.from_annotation
     if not (abs(a.size - b.size) <= SIZE_TOL and a.bold == b.bold):
@@ -238,21 +246,32 @@ def _rule_between(a: TextLine, b: TextLine, page: Page) -> bool:
                and r.bbox.h_overlap(a.bbox) > 0 for r in page.rules)
 
 
-def _own_control(line: TextLine, page: Page) -> bool:
-    """A control row-aligned with the line and belonging to it.
+def _anchor_ids(page: Page) -> set[int]:
+    """Lines that a response control anchors - each one starts a new field.
 
-    Scoping matters: the wrapped question's rows do line up with the radio
-    circles, but those circles sit in the response column 390pt away, so they
-    must not terminate the question. A control counts as the line's own only if
-    it is in the same band and horizontally adjacent.
+    Controls are the most reliable item boundary a CRF offers: where pitch is
+    uniform and every criterion wraps, the checkbox is what says "new question
+    here". Each control claims only the *topmost* line it sits beside, so a
+    control level with line 1 of a wrapped label does not also split line 2.
+
+    Scoping matters both ways: the Disposition page's radio circles are level
+    with the wrapped question's rows but live in the response column 390pt away,
+    so they must not anchor it.
     """
-    if len(page.column_bands) < 2:
-        return False    # no known column structure: fall back to pitch and alignment
+    anchors: set[int] = set()
+    for c in page.controls:
+        beside = [l for l in page.lines if l.text.strip() and _control_belongs(l, c, page)]
+        if beside:
+            anchors.add(id(min(beside, key=lambda l: l.bbox.y0)))
+    return anchors
+
+
+def _control_belongs(line: TextLine, control: Control, page: Page) -> bool:
+    """Control is on the line's row, in its column band, and within reach."""
     band = next((b for b in page.column_bands if b.index == line.column), None)
-    return any(c.bbox.v_overlap(line.bbox) >= ROW_OVERLAP
-               and (band is None or band.contains(c.bbox, 0.3))
-               and _near(line.bbox, c.bbox)
-               for c in page.controls)
+    return (control.bbox.v_overlap(line.bbox) >= ROW_OVERLAP
+            and (band is None or band.contains(control.bbox, 0.3))
+            and _near(line.bbox, control.bbox))
 
 
 def _near(a: BBox, b: BBox) -> bool:
@@ -300,12 +319,12 @@ def assign_roles(page: Page) -> None:
     sizes = [g.size for g in body] or [0.0]
     med_size = median(sizes)
     for g in page.groups:
+        if g.from_annotation_only():     # markup, wherever it sits on the page
+            g.role, g.role_confidence, g.role_evidence = UNKNOWN, 0.0, ["annotation markup"]
+            continue
         if g.region in (HEADER, FOOTER):
             g.role = PAGE_HEADER if g.region == HEADER else FOOTER_ROLE
             g.role_confidence, g.role_evidence = 0.9, [f"region={g.region.lower()}"]
-            continue
-        if g.from_annotation_only():
-            g.role, g.role_confidence, g.role_evidence = UNKNOWN, 0.0, ["annotation markup"]
             continue
         band = next((b for b in page.column_bands if b.index == g.column), None)
         hint = band.role_hint if band else UNKNOWN_ZONE

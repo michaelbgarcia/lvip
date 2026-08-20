@@ -72,6 +72,25 @@ and no answer control of its own. Line pitch is the workhorse: wrapped lines sit
 size apart, separately drawn fields ~2×. When MuPDF already grouped lines into one block,
 that grouping is trusted and only pitch is re-checked.
 
+**MuPDF block numbers are never the grouping key.** They are unreliable in both directions:
+on a right-aligned criteria page, MuPDF splits one criterion across blocks `[2, 3]` (its
+block detection keys on left-edge continuity, and ragged-left text has a jumping left edge),
+while elsewhere it merges freely. Grouping is geometric, so a block split costs nothing —
+`test_grouping_ignores_muPDF_block_splits` pins that behaviour.
+
+**Where pitch cannot help, controls mark the boundaries.** On a criteria page every line is
+the same distance apart, within items *and* between them, so pitch says "merge everything".
+What separates the items is the checkbox beside each one: a control row-aligned with a line,
+in its band and within an inch, means that line *starts* a field. Each control claims only
+the topmost line it sits beside, so a tall checkbox level with a whole wrapped label anchors
+line 1 rather than splitting the label. Numbering (`1.`, `a)`, `•`) is the second, redundant
+signal — the fixture page groups correctly with either one disabled.
+
+**A trailing colon ends a label, unless a list continues.** `...currently enrolled:` closes
+a question, but `2. Have any of the following:` runs on into `Hypo/hyper-thyroidism;`. A
+following line that ends in `;` or `,` is treated as a list continuation; without that
+exception criterion 2 splits into two fragments.
+
 **Columns are detected, not assumed.** `detect_columns` finds the widest whitespace gutter
 that most body lines are actually *paired across* — the pairing test is what stops a local
 gap between short labels reading as a column boundary. Two bands get the CRF prior

@@ -12,8 +12,8 @@ def doc(sample_pdf):
 
 
 def test_pages_and_dimensions(doc):
-    assert doc.page_count == 4
-    assert [p.number for p in doc.pages] == [1, 2, 3, 4]     # 1-based
+    assert doc.page_count == 5
+    assert [p.number for p in doc.pages] == [1, 2, 3, 4, 5]  # 1-based
     p = doc.page(1)
     assert (round(p.width), round(p.height)) == (595, 842)   # A4
     assert p.rotation == 0
@@ -29,7 +29,7 @@ def test_text_layers_present(doc):
 
 def test_annotations_extracted(doc):
     texts = [a.text for a in doc.iter_annotations()]
-    assert len(texts) == 15
+    assert len(texts) == 17
     for expected in ("DM=Demographics", "BRTHDTC", "[NOT SUBMITTED]", "See Page 2",
                      "RACEOTH when SUPPDM.QNAM=RACEOTH"):
         assert expected in texts
@@ -66,14 +66,14 @@ def test_relative_coordinates(doc):
 def test_json_roundtrip(doc, tmp_path):
     out = dump_json(doc, tmp_path / "d.json")
     data = json.loads(out.read_text())
-    assert data["page_count"] == 4
+    assert data["page_count"] == 5
     assert data["pages"][0]["annotations"][0]["bbox"] == list(
         doc.page(1).annotations[0].bbox.as_tuple())
 
 
 def test_summary_and_missing_file(doc, tmp_path):
     s = summarize(doc)
-    assert s["annotations"] == 15 and s["pages_without_text"] == []
+    assert s["annotations"] == 17 and s["pages_without_text"] == []
     with pytest.raises(FileNotFoundError):
         ACRFParser(tmp_path / "nope.pdf")
 

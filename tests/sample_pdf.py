@@ -71,6 +71,49 @@ def _disposition_page(doc: pymupdf.Document) -> None:
         a.update()
 
 
+# Page 5 reproduces an Eligibility Criteria page: right-aligned criteria, uniform
+# line pitch within *and between* items, one checkbox per item. Nothing but the
+# numbering and the checkboxes marks where one criterion ends and the next begins.
+# Drawn line by line, so grouping cannot lean on MuPDF's block numbering.
+CRITERIA = [
+    ["1. Have hypochondroplasia or", "short stature condition other than",
+     "ACH (e.g., trisomy 21,", "pseudoachondroplasia)"],
+    ["2. Have any of the following:", "Hypo/hyper-thyroidism;",
+     "Insulin-requiring diabetes", "mellitus; Autoimmune",
+     "inflammatory disease;", "Inflammatory bowel disease;", "Autonomic neuropathy"],
+    ["3. Have a history of any of the", "following: Renal insufficiency;",
+     "Chronic anemia; Baseline", "systolic BP < 70 mm Hg or", "recurrent",
+     "symptomatic/orthostatic", "hypotension; Cardiac or vascular", "disease"],
+    ["4. Have a clinically significant", "finding or arrhythmia on",
+     "screening ECG that indicates", "abnormal cardiac function or",
+     "conduction or QTc-F > 450 msec"],
+]
+RIGHT_MARGIN = 480.0
+
+
+def _eligibility_page(doc: pymupdf.Document) -> None:
+    page = doc.new_page()
+    page.insert_text((60, 40), "Form: Eligibility Criteria", fontsize=10, fontname="hebo")
+    page.insert_text((60, 56), "Generated On: 10 Jun 2019 17:31:09", fontsize=10, fontname="hebo")
+    page.draw_line(pymupdf.Point(55, 66), pymupdf.Point(540, 66))
+
+    y = 90.0
+    for item in CRITERIA:
+        for i, txt in enumerate(item):
+            w = pymupdf.get_text_length(txt, fontname="helv", fontsize=10)
+            page.insert_text((RIGHT_MARGIN - w, y), txt, fontsize=10)   # right aligned
+            if i == 0:
+                page.draw_circle(pymupdf.Point(492, y - 3), 6)          # one box per item
+            y += 12                                                     # uniform pitch
+    for text, rect in (
+        ("EL=Eligibility", pymupdf.Rect(60, 10, 200, 28)),
+        ("See Page 7", pymupdf.Rect(250, 30, 340, 50)),
+    ):
+        a = page.add_freetext_annot(rect, text, fontsize=9, text_color=RED)
+        a.set_info(content=text, title="annotator")
+        a.update()
+
+
 def build(path: str | Path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -88,6 +131,7 @@ def build(path: str | Path) -> Path:
             a.set_info(content=text, title="annotator")
             a.update()
     _disposition_page(doc)
+    _eligibility_page(doc)
     doc.save(path)
     doc.close()
     return path
