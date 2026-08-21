@@ -48,3 +48,21 @@ def second_doc(tmp_path_factory):
     from acrf_parser import parse_pdf
     from tests.sample_pdf import build_second_study
     return parse_pdf(build_second_study(tmp_path_factory.mktemp("pdf2") / "second.pdf"))
+
+
+@pytest.fixture(scope="session")
+def corpus(doc, second_doc):
+    """Two finished studies standing in for a historical corpus."""
+    return [doc, second_doc]
+
+
+@pytest.fixture(scope="session")
+def index(corpus):
+    from acrf_parser.prefill import PrefillIndex
+    return PrefillIndex.from_documents(corpus)
+
+
+@pytest.fixture(scope="session")
+def house(corpus):
+    from acrf_parser.style import derive_house_style
+    return derive_house_style(corpus)

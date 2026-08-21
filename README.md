@@ -44,10 +44,13 @@ The relation, persisted and queried back:
 ```python
 from acrf_parser import build_kb, KnowledgeBase
 
-build_kb(doc, "kb.sqlite")                       # accumulates across studies
+build_kb(doc, "kb.sqlite")                             # one study
+build_kb(parse_pdf("other_study.pdf"), "kb.sqlite")    # a second one accumulates
+
 with KnowledgeBase("kb.sqlite") as kb:
     kb.variable_for("Medical History", "Start Date")   # 'MHSTDTC'
     kb.variable_for("Adverse Events", "Start Date")    # 'AESTDTC' - never the same row
+    kb.variable_for("Demographics", "Start Date")      # None - the form is half the key
     kb.disagreements()                                 # keys whose pages disagree
 ```
 
@@ -75,6 +78,11 @@ for m in apply_template(template, parse_pdf("blank_crf.pdf")):
 | [acrf_parser/linking.py](acrf_parser/linking.py) | **Phase 6** — scored, row-aware field↔annotation links |
 | [acrf_parser/kb.py](acrf_parser/kb.py) | **Phase 7** — SQLite knowledge base |
 | [acrf_parser/template.py](acrf_parser/template.py) | **Phase 8** — template creation and application |
+| [acrf_parser/style.py](acrf_parser/style.py) | house style — colour/font/placement conventions measured from a corpus |
+| [acrf_parser/prefill.py](acrf_parser/prefill.py) | deterministic pre-fill — five scored tiers, offline, no model |
+| [acrf_parser/staging.py](acrf_parser/staging.py) | **Phase 9a/b** — the staging workbook |
+| [acrf_parser/importer.py](acrf_parser/importer.py) | **Phase 9c** — reading the workbook back, validated per row |
+| [acrf_parser/writer.py](acrf_parser/writer.py) | **Phase 10** — drawing approved annotations onto the PDF |
 | [acrf_parser/normalize.py](acrf_parser/normalize.py) | shared text normalization |
 | [acrf_parser/cli.py](acrf_parser/cli.py) | `python -m acrf_parser` |
 | [tests/sample_pdf.py](tests/sample_pdf.py) | synthetic aCRF fixture generator |
@@ -90,6 +98,38 @@ for m in apply_template(template, parse_pdf("blank_crf.pdf")):
 - [x] **6 — Field↔annotation linking.** `link_score`, row-aware, never pure nearest-neighbour.
 - [x] **7 — Knowledge base.** SQLite: forms, fields, annotations, links.
 - [x] **8 — Template creation.** Coordinate-free templates, and applying one to a blank CRF.
+- [x] **House style.** `/DA` appearance capture, and colour/font/placement conventions derived from a corpus.
+- [x] **9a — Deterministic pre-fill.** Five scored tiers against the corpus, offline.
+- [x] **9b — Staging XLSX export.** Work sheet, locked geometry, house style, instructions.
+- [x] **9c — Staging XLSX import.** Per-row validation, review copy written back.
+- [x] **10 — PDF annotation writing.** Approved rows drawn, clamped, de-collided, re-readable.
+- [x] **11 — The return edge.** Approved rows fed back, with trust and rejections.
+
+## The blank-CRF workflow
+
+```bash
+# 1. ingest history once (per annotated study)
+.venv/bin/python -m acrf_parser study_2023.pdf --db corpus.sqlite --quiet
+
+# 2. stage a new blank CRF against everything learned so far
+.venv/bin/python -m acrf_parser blank_crf.pdf -o output --staging --corpus corpus.sqlite
+
+# 3. read the reviewed workbook back, draw the approved rows onto the PDF, and
+#    feed them into the corpus (exit 1 if any row is unwritable, so it can gate
+#    a pipeline). --learn is opt-in: see "The return edge" below.
+.venv/bin/python -m acrf_parser blank_crf.pdf -o output \
+    --import-staging reviewed.xlsx --corpus corpus.sqlite \
+    --write-annotations --learn
+```
+
+The knowledge base is read at step 2 and written at step 3. It does three jobs
+on the way out — the mapping pre-fill, the house style that fills the formatting
+columns, and resolving each form's SDTM domain — and on the way back it learns
+what the reviewer decided.
+
+Step 2 writes a workbook with one row per CRF field, pre-filled from history,
+each row carrying the tier that filled it and why. What history could not reach
+is marked `NEEDS_MAPPING` — that, and only that, is the agent's work.
 
 ## Design notes
 
@@ -232,6 +272,189 @@ back by exact key. The fourteenth is the honest part: the Disposition page was
 named only by `DS=Disposition`, so with the markup gone the page is inherited by
 the form above it and its field can only match on text, under the wrong form, at
 0.3. The method says so rather than reporting a confident answer.
+
+**Pre-fill is deterministic and runs before any model does.** Five tiers, all
+scored, all explainable, all offline —
+[prefill.py](acrf_parser/prefill.py) needs nothing but stdlib and SQLite:
+
+| tier | fires when |
+|---|---|
+| `EXACT_KEY` | `(form, field_text)` seen before — the answer, not a guess |
+| `CROSS_FORM_CONSENSUS` | the label maps to one variable in *every* form that has used it |
+| `DOMAIN_PATTERN` | SDTM's naming convention, learned from the corpus |
+| `FUZZY_SAME_FORM` | same form, near-identical wording |
+| `NEEDS_MAPPING` | nothing in history reaches it — the agent's real job |
+
+`DOMAIN_PATTERN` is the one that generalises. Seeing `MHSTDTC` on a Medical
+History form teaches that the label "start date" plays the role `STDTC`; seeing
+`AESTDTC` confirms it across a second domain. A Concomitant Medications form is
+then pre-filled `CMSTDTC` although CM appears nowhere in the corpus. The
+convention belongs to SDTM; the corpus is only evidence of which labels map to
+which role, and a suffix attested by a single domain is treated as coincidence.
+
+`CROSS_FORM_CONSENSUS` is where the corpus rates its own reliability. "Sex" maps
+to `SEX` on every form that has one, so the label alone is sufficient. "Start
+Date" maps to `MHSTDTC`, `AESTDTC` and `CMSTDTC`, so the label alone is
+*insufficient* — and that is discovered from the disagreement rather than
+declared in advance. Where forms disagree, no cross-form suggestion is offered
+and the reason is recorded.
+
+**Only `EXACT_KEY` can auto-approve.** Every fuzzy tier lands as `NEEDS_REVIEW`
+whatever it scored, carrying the source study, the source label and the score,
+so a reviewer sees *"matched 'Start Date' from STUDY-XYZ Medical History at
+0.86"* and not a bare variable name wearing the same clothes as a fact. A
+suggestion that is indistinguishable from a certainty is the failure mode that
+would make the whole pipeline untrustworthy.
+
+The similarity metric blends sequence ratio, containment and Jaccard over lightly
+stemmed tokens, because each alone fails a re-wording that really happens:
+"Conditions"/"Condition" scores 0.0 on raw token sets, and "Start Date" inside
+"Start Date of Condition" is punished by Jaccard for being short. The pair that
+matters is `"start date"` vs `"stop date"` — semantically opposite, and at 0.55
+it sits just under the 0.6 floor. That margin is thin, and
+`test_opposites_stay_below_the_fuzzy_floor` exists to fail loudly if the floor
+is ever raised without re-checking it.
+
+**The staging workbook is shaped by who reads it.** The agent gets one flat table
+with self-describing column names — no merged cells, no nesting. The human gets
+the match tier, score and source study *beside* the suggestion rather than in an
+audit log. The importer gets geometry, which is noise to the other two readers
+and must never be hand-edited, so it lives on a locked `Geometry` sheet keyed by
+`row_id`. Sheet protection is deliberately not switched on: it would stop Copilot
+writing at all. The locked flags record intent, and the importer is what enforces
+it — validation on the way back in, not a UI lock on the way out.
+
+**Validation is per row, not per workbook.** One unparseable colour in row 200
+must not reject the other 199 — the reviewer would fix it, re-import, and meet
+the next problem one round trip later. Every row carries its own verdict, the
+good ones import, and the bad ones come back naming their own problem so they
+can all be fixed in one pass. `write_review_copy` puts each message in an
+`import_issues` column *on the row that needs fixing*, because the reviewer is
+already in Excel and should not have to cross-reference a log by hand.
+
+Severity is split for the same reason. `ERROR` blocks the row — without a
+resolvable colour or geometry there is nothing to draw. `WARNING` lets it
+through flagged, which is the only sane treatment for a signal that is right
+most of the time.
+
+`DOMAIN_MISMATCH` is the example worth keeping. The obvious test — "the variable
+does not start with the form's domain" — is wrong: `DM`'s own variables carry no
+prefix, so `BRTHDTC`, `AGE` and `RACE` each raise a warning on the one form they
+belong to. Three false alarms in four teaches a reviewer to ignore the check,
+which costs more than the check is worth. What actually indicates a mistake is a
+variable wearing *another* domain's code with a real suffix behind it —
+`DSTERM` on a Medical History form. The suffix-length test is what keeps `AGE`
+("AG" + "E") and `SEX` ("SE" + "X") out, since both begin with letters that
+happen to be CDISC domain codes.
+
+Three silent failures the importer exists to catch:
+
+- **A sorted or deleted row.** `row_id` is the only thing tying a spreadsheet row
+  to a position on the PDF. Rows are matched by it and never by position, so
+  reversing the sheet changes nothing and a deleted row is an error rather than
+  an off-by-one annotation.
+- **An edited label.** If `field_text` no longer matches the field its `row_id`
+  points at, the row has stopped describing what it claims to.
+- **An unevaluated formula.** An agent that writes `=CONCAT(...)` into a file
+  nobody opens in Excel leaves no cached value, and the cell reads as blank —
+  which would otherwise import as "no decision" rather than as a problem.
+
+The declared annotation type is checked against the text by running
+[annotations.classify](acrf_parser/annotations.py) over it, so the workbook
+cannot claim a type its own contents contradict — the importer validates with the
+same rules the parser reads with.
+
+**The return edge is ingested from the workbook, not from the PDF we just wrote.**
+Re-parsing the output is the obvious way to close the loop and it quietly
+corrupts the corpus. A blank CRF has no domain-header annotations, so a page
+with no printed title is inherited by the form above it: the Disposition page
+reads as Medical History, and re-parsing relearns that mistake and files
+`DSTERM` under Medical History at 0.95 confidence — a machine error laundered
+into ground truth. The sheet has a `form_name` column, so that column is what is
+believed.
+
+Which meant `form_name` had to become editable. It was locked as evidence, and
+the one column that most needs human correction on a blank CRF was the one the
+reviewer could not touch. A change to it is recorded as `FORM_RENAMED` rather
+than accepted silently, because it changes the primary key.
+
+**Links carry how they were established.** `HUMAN_APPROVED` outranks `GEOMETRIC`,
+and `PrefillIndex` breaks ties on trust before score, so a reviewer's decision
+cannot lose to a lucky geometric match. Occurrences are still all kept — after
+the return edge the Disposition question has two, `DSTERM` from the reviewer and
+`SUPPDS.QVAL` from the original study — and the approved one simply ranks first.
+
+**Rejections are evidence too.** A reviewer who turns down `MHENRF=ONGOING` has
+told you something the corpus had no other way to learn, and re-proposing it
+next study burns their trust in every other row on the sheet. Rejected rows are
+stored as `HUMAN_REJECTED` with the suggestion that was refused, and pre-fill
+zeroes any candidate matching one, saying so in its evidence.
+
+**Learning is opt-in.** `--learn` is a flag, not a side effect of importing,
+because importing is also how you *check* a sheet before it is final. A
+knowledge base that quietly learned from a trial run would serve those rows back
+at full confidence with no record of where they came from, and KB writes are
+hard to undo.
+
+One honest limit: a form-name correction is per document. The knowledge is filed
+under the corrected name, but re-staging *the same* blank CRF still parses that
+page as Medical History, so the key does not match until a document identifies
+the form correctly. `test_approved_work_raises_the_next_run` asserts 5 → 2
+rather than 5 → 0 for exactly this reason.
+
+**The pipeline is checked by reading its own output.** `write_annotations` draws
+the approved rows onto a copy of the blank CRF; the test then parses that copy
+with the same parser — form detection, field extraction, classification and
+linking all running fresh — and requires every mapping the sheet specified to
+come back attached to the field it was specified for. Nine of nine round trip on
+the fixture, with colour, font and size intact. That is a stronger claim than any
+assertion about the writer's internals: it says the thing we produced is the
+thing we can read.
+
+It also pins something easy to miss — annotations *we* wrote must be stripped
+from the text layer on re-parse, or the next study's field extraction would read
+our own markup back as CRF labels. `test_written_annotations_are_stripped_from_the_text_layer`
+exists for that.
+
+**Placement is arithmetic; what arithmetic cannot settle gets reported.** The
+workbook carries the field's box and the house style's offsets as page fractions,
+so a position is recovered by multiplying — no model, and identical output on
+every run. Two things it cannot decide alone:
+
+- **A box that runs off the page.** Long markup placed right of a label near the
+  right margin will not fit. It is pulled back inside the page and the row
+  records the move, because an annotation half off the page is worse than one a
+  reviewer was told about.
+- **Two annotations in the same place.** Fields a fraction of a row apart collide.
+  Rows are drawn top-to-bottom so a nudge always pushes into unclaimed space, the
+  later one moves down, and it says so. Silently overprinted text is the failure
+  a reviewer would only find by eye, on page 40.
+
+Only `ImportedRow.ready` rows are drawn — validated *and* signed off, never one
+without the other. A font the PDF cannot embed is substituted for a base-14 face
+and the substitution is recorded rather than passed off as the real thing.
+
+**Formatting conventions are measured, not inferred.** A FreeText annotation's
+colour and font are not in `/C` or `/IC` — `annot.colors` comes back empty for
+them. They live in the `/DA` default-appearance string
+(`0.85 0.1 0.1 rg /Helv 8.0 Tf`), which
+[extract.parse_da](acrf_parser/extract.py) parses into RGB, font and size,
+normalising grayscale and CMYK so two spellings of one colour do not read as
+disagreement. [style.py](acrf_parser/style.py) then counts those over a corpus
+to produce a `StyleRule` per annotation type.
+
+Every rule carries `samples` and `agreement` — the share that matched the modal
+value — because the useful output is not an average but a verdict on whether the
+corpus agrees. The fixture renders domain headers at 8pt on three pages and 9pt
+on two: agreement `0.50`, `settled=False`, escalated to a human. Averaging would
+have produced 8.5pt, a size nobody chose and which no reviewer would recognise
+as wrong. Placement is measured only where an annotation is linked to a field;
+unlinked markup still contributes its colour and font, just not its position.
+
+This exists so that a downstream agent is never asked to *calculate* placement
+or colour. Those are facts about finished work, recoverable by counting, and an
+LLM asked for them returns plausible coordinates that are subtly wrong — the one
+class of error a human reviewing a spreadsheet cannot catch.
 
 **Annotation text is stripped from the page text layer.** PyMuPDF ≥1.24 renders
 annotation appearance streams into `page.get_text()`, so `BRTHDTC` appears both

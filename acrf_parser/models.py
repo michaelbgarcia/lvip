@@ -216,6 +216,12 @@ class Annotation:
     content: str = ""                 # annot /Contents
     title: str = ""                   # annot /T (author field)
     color: tuple[float, ...] | None = None
+    # Rendered appearance, read from the /DA string (see extract.parse_da).
+    # This is the raw material for house-style derivation: an aCRF's colour and
+    # font conventions are measurable facts about the corpus, not judgement calls.
+    text_color: tuple[float, ...] | None = None
+    font_name: str = ""
+    font_size: float = 0.0
     xref: int = 0
     id: str = ""                      # stable within a document: p<page>a<index>
     annot_type: str = ""              # Phase 5 classification, filled later
@@ -309,6 +315,12 @@ class Field:
         return (normalize(self.form_name), self.normalized_text)
 
 
+# How a link came to exist. Ranked: a reviewer's decision outranks anything the
+# geometry inferred, and an explicit rejection is evidence in its own right.
+GEOMETRIC, HUMAN_APPROVED, HUMAN_REJECTED = "GEOMETRIC", "HUMAN_APPROVED", "HUMAN_REJECTED"
+TRUST_RANK = {HUMAN_APPROVED: 2, GEOMETRIC: 1, HUMAN_REJECTED: 0}
+
+
 @dataclass
 class Link:
     """A scored field <-> annotation association (Phase 6)."""
@@ -318,6 +330,7 @@ class Link:
     link_score: float
     evidence: list[str] = field(default_factory=list)
     rejected: bool = False            # kept for audit: scored but lost to a better link
+    trust: str = GEOMETRIC
 
 
 @dataclass

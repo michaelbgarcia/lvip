@@ -6,6 +6,7 @@ happens here: later phases consume the Document this produces.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,14 @@ from .normalize import clean
 _BOLD_FLAG = 1 << 4     # span flags bit for bold
 _RULE_MAX_THICK = 2.0   # a filled rect this thin is a ruled line, not a box
 _CTRL_MIN_SIDE = 4.0    # smaller than this is decoration, not an input control
+
+# /DA ("default appearance") operators. A FreeText annotation's colour and font
+# live here, not in /C or /IC - `annot.colors` comes back empty for them, which
+# is why the styling looked absent until this was parsed.
+_DA_FONT = re.compile(r"/([^\s/]+)\s+([\d.]+)\s+Tf")
+_DA_RGB = re.compile(r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+rg\b", re.I)
+_DA_GRAY = re.compile(r"(?<![\d.])([\d.]+)\s+g\b")
+_DA_CMYK = re.compile(r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+k\b", re.I)
 
 
 class ACRFParser:
@@ -151,10 +160,12 @@ class ACRFParser:
     def _annotations(self, page: pymupdf.Page) -> list[Annotation]:
         """PDF annotation objects: SDTM markup lives here as /Contents or appearance text."""
         annots: list[Annotation] = []
+        fallback = self._acroform_da(page.parent)
         for a in page.annots():
             info = a.info or {}
             content = clean(info.get("content", ""))
             text = content or self._annot_appearance_text(a)
+            style = parse_da(self._annot_da(page.parent, a.xref) or fallback)
             annots.append(Annotation(
                 page=page.number + 1,
                 text=text,
@@ -164,9 +175,38 @@ class ACRFParser:
                 content=content,
                 title=clean(info.get("title", "")),
                 color=self._annot_color(a),
+                text_color=style["text_color"],
+                font_name=style["font_name"],
+                font_size=style["font_size"],
                 xref=a.xref,
             ))
         return annots
+
+    @staticmethod
+    def _annot_da(pdf: pymupdf.Document, xref: int) -> str:
+        """The annotation's own /DA string, if it carries one."""
+        try:
+            kind, value = pdf.xref_get_key(xref, "DA")
+        except Exception:
+            return ""
+        return value if kind == "string" else ""
+
+    @staticmethod
+    def _acroform_da(pdf: pymupdf.Document) -> str:
+        """Document-level default appearance.
+
+        An annotation with no /DA of its own inherits the AcroForm default, so a
+        study that sets its house style once at the document level would
+        otherwise read as having no styling at all.
+        """
+        try:
+            kind, value = pdf.xref_get_key(pdf.pdf_catalog(), "AcroForm")
+            if kind == "xref":
+                kind, value = pdf.xref_get_key(int(value.split()[0]), "DA")
+                return value if kind == "string" else ""
+        except Exception:
+            pass
+        return ""
 
     @staticmethod
     def _annot_appearance_text(a: pymupdf.Annot) -> str:
@@ -219,3 +259,35 @@ def summarize(doc: Document) -> dict[str, Any]:
         "pages_without_text": [p.number for p in doc.pages if not p.text.strip()],
         "pages_without_annotations": [p.number for p in doc.pages if not p.annotations],
     }
+
+
+def parse_da(da: str) -> dict[str, Any]:
+    """Parse a PDF /DA (default appearance) string into colour, font and size.
+
+    `'0.85 0.1 0.1 rg /Helv 8.0 Tf'` -> red text, Helvetica, 8pt. Grayscale (`g`)
+    and CMYK (`k`) are converted to RGB so downstream comparison is uniform -
+    house style is derived by counting identical values, and two spellings of
+    the same colour would read as disagreement.
+
+    A font size of 0 is the PDF convention for auto-size, and is reported as 0.0
+    rather than guessed at.
+    """
+    out: dict[str, Any] = {"text_color": None, "font_name": "", "font_size": 0.0}
+    if not da:
+        return out
+    font = _DA_FONT.search(da)
+    if font:
+        out["font_name"] = font.group(1)
+        out["font_size"] = round(float(font.group(2)), 2)
+    rgb = _DA_RGB.search(da)
+    gray = _DA_GRAY.search(da)
+    cmyk = _DA_CMYK.search(da)
+    if rgb:
+        out["text_color"] = tuple(round(float(v), 3) for v in rgb.groups())
+    elif cmyk:
+        c, m, y, k = (float(v) for v in cmyk.groups())
+        out["text_color"] = tuple(round((1 - v) * (1 - k), 3) for v in (c, m, y))
+    elif gray:
+        v = round(float(gray.group(1)), 3)
+        out["text_color"] = (v, v, v)
+    return out

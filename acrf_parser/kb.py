@@ -92,6 +92,11 @@ CREATE TABLE IF NOT EXISTS annotations (
     evidence      TEXT,
     bbox          TEXT NOT NULL,
     relative      TEXT NOT NULL,
+    -- Rendered appearance, so house style can be derived from the database
+    -- without re-parsing every PDF in the corpus.
+    text_color    TEXT,
+    font_name     TEXT,
+    font_size     REAL,
     UNIQUE (document_id, annot_ref)
 );
 
@@ -102,7 +107,15 @@ CREATE TABLE IF NOT EXISTS links (
     annotation_id  INTEGER NOT NULL REFERENCES annotations(id) ON DELETE CASCADE,
     link_score     REAL NOT NULL,
     rejected       INTEGER NOT NULL DEFAULT 0,
-    evidence       TEXT
+    evidence       TEXT,
+    -- GEOMETRIC | HUMAN_APPROVED | HUMAN_REJECTED. A reviewer's decision is a
+    -- different kind of fact from an inference and must not lose a tie to one.
+    trust          TEXT NOT NULL DEFAULT 'GEOMETRIC',
+    -- Placement relative to the field, computed once at write time so the
+    -- geometry logic is not reimplemented against stored coordinates.
+    relative_label TEXT,
+    offset_x_pct   REAL,
+    offset_y_pct   REAL
 );
 
 CREATE INDEX IF NOT EXISTS ix_fields_key   ON fields(field_key);
@@ -114,13 +127,23 @@ CREATE VIEW IF NOT EXISTS field_annotations AS
 SELECT d.file_name, fm.name AS form_name, fm.domain, f.field_key, f.page,
        f.text AS field_text, f.normalized_text,
        a.text AS annotation_text, a.annot_type, a.variable, a.value, a.qnam,
-       l.link_score, f.confidence AS field_confidence
+       l.link_score, l.trust, f.confidence AS field_confidence
 FROM   links l
 JOIN   fields f       ON f.id = l.field_id
 JOIN   annotations a  ON a.id = l.annotation_id
 JOIN   forms fm       ON fm.id = f.form_id
 JOIN   documents d    ON d.id = f.document_id
 WHERE  l.rejected = 0;
+
+-- What a reviewer explicitly turned down. Consulted so the corpus stops
+-- proposing an answer a human has already rejected.
+CREATE VIEW IF NOT EXISTS rejected_suggestions AS
+SELECT f.field_key, a.text AS annotation_text, a.variable, d.file_name
+FROM   links l
+JOIN   fields f      ON f.id = l.field_id
+JOIN   annotations a ON a.id = l.annotation_id
+JOIN   documents d   ON d.id = f.document_id
+WHERE  l.trust = 'HUMAN_REJECTED';
 
 -- Occurrences folded into one row per (form, field). `variants` > 1 means the
 -- pages of one form disagree - a review item, not something to hide.
@@ -228,27 +251,39 @@ def _insert_annotations(con, doc: Document, doc_id: int, form_ids: dict[str, int
             cur = con.execute(
                 "INSERT INTO annotations (document_id, form_id, annot_ref, page, text,"
                 " annot_type, confidence, variable, domain, value, qnam, target_page,"
-                " parsed, evidence, bbox, relative)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " parsed, evidence, bbox, relative, text_color, font_name, font_size)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (doc_id, form_ids.get(normalize(a.form_name)), a.id, a.page, a.text,
                  a.annot_type, a.type_confidence, p.get("variable"), p.get("domain"),
                  p.get("value"), p.get("qnam"), p.get("target_page"),
                  json.dumps(p), json.dumps(a.type_evidence),
                  json.dumps(list(a.bbox.as_tuple())),
-                 json.dumps(a.bbox.relative(page.width, page.height))))
+                 json.dumps(a.bbox.relative(page.width, page.height)),
+                 json.dumps(list(a.text_color)) if a.text_color else None,
+                 a.font_name or None, a.font_size or None))
             ids[a.id] = int(cur.lastrowid)
     return ids
 
 
 def _insert_links(con, doc: Document, doc_id: int, field_ids, annot_ids) -> None:
+    from .template import relative_label
     for l in doc.links:
         fid, aid = field_ids.get(l.field_id), annot_ids.get(l.annotation_id)
         if fid is None or aid is None:
             continue
+        fld, a, page = doc.field(l.field_id), doc.annotation(l.annotation_id), doc.page(l.page)
+        label = offx = offy = None
+        if fld and a and page:
+            w, h = page.width or 1.0, page.height or 1.0
+            label = relative_label(a, fld)
+            offx = round((a.bbox.x0 - fld.bbox.x1) / w, 4)
+            offy = round((a.bbox.cy - fld.bbox.cy) / h, 4)
         con.execute(
             "INSERT INTO links (document_id, field_id, annotation_id, link_score,"
-            " rejected, evidence) VALUES (?,?,?,?,?,?)",
-            (doc_id, fid, aid, l.link_score, int(l.rejected), json.dumps(l.evidence)))
+            " rejected, evidence, trust, relative_label, offset_x_pct, offset_y_pct)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (doc_id, fid, aid, l.link_score, int(l.rejected), json.dumps(l.evidence),
+             l.trust, label, offx, offy))
 
 
 def field_key(fld: Field) -> str:
@@ -316,3 +351,123 @@ class KnowledgeBase:
             "links": one("SELECT COUNT(*) FROM links WHERE rejected = 0"),
             "mapped_keys": one("SELECT COUNT(*) FROM field_map"),
         }
+
+
+# --- the return edge -------------------------------------------------------
+LEARNED_CONFIDENCE = 1.0     # a human said so; nothing scores higher
+
+
+def ingest_approved(report, blank_doc: Document, db_path: str | Path,
+                    source: str | None = None) -> Path:
+    """Feed a reviewed staging workbook back into the knowledge base.
+
+    The return edge. Every approved row is a verified `(form, field_text) ->
+    annotation` pair, and it is the best data the system ever sees - a person
+    signed it. Without this the expensive rows are re-solved from scratch on
+    every study.
+
+    Ingested from the *workbook*, deliberately, and not by re-parsing the PDF we
+    just wrote. Re-parsing throws away what the reviewer told us and re-derives
+    it: on a blank CRF the domain-header annotations are absent, so a page that
+    belongs to Disposition is inherited by the form above it, and the pair lands
+    under the wrong form name - a machine-made error laundered into ground truth
+    at 0.95 confidence. The sheet has a `form_name` column the reviewer could
+    correct, so that column is what is believed here.
+
+    Rejections are ingested too, as `HUMAN_REJECTED`. "The reviewer said no to
+    MHSTDTC here" is the only thing that stops the same wrong suggestion coming
+    back next study.
+    """
+    doc = _document_from_review(report, blank_doc, source)
+    return build_kb(doc, db_path)
+
+
+def _document_from_review(report, blank_doc: Document, source: str | None) -> Document:
+    """Rebuild a Document whose annotations are the reviewer's decisions.
+
+    Works on a deep copy. Ingesting must not reach back into the caller's
+    document: this function renames fields to match the sheet and replaces each
+    page's annotation list, and doing that to the caller's object would silently
+    rewrite the parse they are still holding - and destroy the annotations
+    outright if the document had any.
+    """
+    import copy
+
+    from .models import Document as Doc, Form, HUMAN_APPROVED, HUMAN_REJECTED
+
+    doc = Doc(path=source or f"{blank_doc.path}#reviewed",
+              page_count=blank_doc.page_count,
+              metadata={"origin": "approved staging workbook",
+                        "source_pdf": blank_doc.path})
+    doc.pages = copy.deepcopy(blank_doc.pages)
+    doc.forms = [Form(name=f.name, pages=list(f.pages), domain=f.domain,
+                      source=f.source, confidence=f.confidence,
+                      evidence=list(f.evidence),
+                      continuation_pages=list(f.continuation_pages))
+                 for f in blank_doc.forms]
+
+    by_id = {f.id: f for f in doc.iter_fields()}
+    rows = [(r, HUMAN_APPROVED) for r in report.approved()]
+    rows += [(r, HUMAN_REJECTED) for r in report.rejected()]
+
+    for page in doc.pages:
+        page.annotations = []
+    for i, (row, trust) in enumerate(rows):
+        fld = by_id.get(row.row_id)
+        page = doc.page(fld.page) if fld else None
+        if not (fld and page):
+            continue
+        _apply_form_name(doc, fld, row)
+        text = (row.text_to_draw if trust == HUMAN_APPROVED
+                else row.suggested_annotation or row.suggested_variable)
+        annot = _annotation_from_row(row, fld, page, text, i)
+        page.annotations.append(annot)
+        doc.links.append(_link_from_row(row, fld, annot, trust))
+    return doc
+
+
+def _apply_form_name(doc: Document, fld, row) -> None:
+    """Believe the sheet's form name over the blank CRF's guess at it."""
+    if not row.form_name or normalize(row.form_name) == normalize(fld.form_name):
+        return
+    fld.form_name = row.form_name
+    if doc.form(row.form_name) is None:
+        from .models import Form
+        doc.forms.append(Form(name=row.form_name, pages=[fld.page],
+                              source="staging workbook", confidence=1.0,
+                              evidence=["form named by the reviewer"]))
+
+
+def _annotation_from_row(row, fld, page, text: str, index: int):
+    """A synthetic Annotation standing for what the reviewer decided.
+
+    Placed where the writer would draw it, so the geometry the next study learns
+    its house style from is the geometry that was actually used.
+    """
+    from .models import Annotation, BBox
+    from .annotations import classify
+    parsed = classify(text)
+    w, h = page.width or 1.0, page.height or 1.0
+    x0 = fld.bbox.x1 + (row.geometry.get("offset_x_pct") or 0.0) * w
+    cy = fld.bbox.cy + (row.geometry.get("offset_y_pct") or 0.0) * h
+    size = row.font_size or 8.0
+    box = BBox(round(x0, 2), round(cy - size, 2),
+               round(x0 + max(len(text), 1) * size * 0.55, 2), round(cy + size, 2))
+    return Annotation(
+        page=fld.page, text=text, bbox=box, subtype="FreeText",
+        id=f"p{fld.page}r{index}", form_name=row.form_name or fld.form_name,
+        annot_type=row.annot_type or parsed.annot_type,
+        parsed=dict(parsed.parsed) or ({"variable": row.variable} if row.variable else {}),
+        type_confidence=LEARNED_CONFIDENCE, type_evidence=["approved by a reviewer"],
+        parts=[parsed], text_color=row.text_color, font_name=row.font_name,
+        font_size=row.font_size)
+
+
+def _link_from_row(row, fld, annot, trust: str):
+    from .models import HUMAN_REJECTED, Link
+    return Link(field_id=fld.id, annotation_id=annot.id, page=fld.page,
+                link_score=LEARNED_CONFIDENCE, trust=trust,
+                rejected=trust == HUMAN_REJECTED,
+                evidence=[f"{trust.lower().replace('_', ' ')} in the staging workbook"]
+                + ([f"pre-fill had suggested {row.suggested_annotation!r} "
+                    f"via {row.match_tier}"] if row.suggested_annotation else []))
