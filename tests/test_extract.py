@@ -116,8 +116,30 @@ def test_interior_colour_is_the_fill(tmp_path):
     assert sq.color == (0.0, 0.0, 0.0)      # /C is the border here, not the fill
 
 
-def test_unfilled_annotation_reports_no_fill(doc):
-    """The sample study draws no background: absent must not be guessed at."""
+def test_the_studys_own_fill_is_read_back(doc):
+    """The sample corpus is red on pale yellow; both colours must survive."""
     a = next(a for a in doc.iter_annotations() if a.text == "BRTHDTC")
-    assert a.fill_color is None and a.fill_source == ""
     assert a.text_color == (0.85, 0.1, 0.1)
+    assert a.fill_color == (1.0, 0.98, 0.77) and a.fill_source == "APPEARANCE"
+
+
+def test_unfilled_annotation_reports_no_fill(tmp_path):
+    """Absent must not be guessed at: a bare box has no fill, not a white one."""
+    import pymupdf
+    from acrf_parser import parse_pdf
+    d = pymupdf.open()
+    page = d.new_page()
+    a = page.add_freetext_annot(pymupdf.Rect(200, 60, 360, 80), "AGE",
+                                fontsize=8, text_color=(0.85, 0.1, 0.1))
+    a.set_info(content="AGE")
+    a.update()
+    d.save(tmp_path / "bare.pdf")
+    a = next(iter(parse_pdf(tmp_path / "bare.pdf").iter_annotations()))
+    assert a.fill_color is None and a.fill_source == ""
+
+
+def test_an_annotations_own_box_is_not_a_response_control(doc):
+    """A filled annotation paints a rectangle. It is markup, not an answer box."""
+    p = doc.page(1)
+    for c in p.controls:
+        assert not any(c.bbox.inside_frac(a.bbox) >= 0.9 for a in p.annotations)

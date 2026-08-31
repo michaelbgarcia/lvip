@@ -39,6 +39,12 @@ class StyleRule:
     samples: int = 0
     text_color: tuple[float, ...] | None = None
     color_agreement: float = 0.0
+    # The box's background. Measured only over the annotations that actually
+    # carry one, with `fill_samples` saying how many that was - a corpus where
+    # three boxes in two hundred are yellow must not report yellow at 100%.
+    fill_color: tuple[float, ...] | None = None
+    fill_agreement: float = 0.0
+    fill_samples: int = 0
     font_name: str = ""
     font_agreement: float = 0.0
     font_size: float = 0.0
@@ -108,6 +114,8 @@ def _rule(scope: str, annots: list[Annotation], placements: list[tuple]) -> Styl
         return rule
 
     rule.text_color, rule.color_agreement = _mode(a.text_color for a in annots)
+    rule.fill_color, rule.fill_agreement = _mode(a.fill_color for a in annots)
+    rule.fill_samples = sum(1 for a in annots if a.fill_color)
     rule.font_name, rule.font_agreement = _mode(a.font_name for a in annots)
     rule.font_size, rule.size_agreement = _mode(a.font_size for a in annots)
 
@@ -128,6 +136,9 @@ def _evidence(rule: StyleRule) -> list[str]:
     ev = [f"{rule.samples} annotation(s) measured"]
     if rule.text_color is not None:
         ev.append(f"colour {rule.text_color} in {rule.color_agreement:.0%} of them")
+    if rule.fill_color is not None:
+        ev.append(f"fill {rule.fill_color} in {rule.fill_agreement:.0%} of the "
+                  f"{rule.fill_samples} filled box(es)")
     if rule.font_name:
         ev.append(f"font {rule.font_name} in {rule.font_agreement:.0%}")
     if rule.font_size:
@@ -179,6 +190,7 @@ def summarize_style(style: HouseStyle) -> dict[str, Any]:
         "documents": len(style.documents),
         "samples": d.samples,
         "text_color": d.text_color,
+        "fill_color": d.fill_color,
         "font": f"{d.font_name} {d.font_size}pt" if d.font_name else "",
         "placement": d.placement,
         "settled": d.settled,
@@ -195,7 +207,8 @@ def derive_house_style_from_kb(kb) -> HouseStyle:
     computed at write time - so the geometry logic lives in exactly one place.
     """
     rows = [dict(r) for r in kb.con.execute(
-        "SELECT annot_type, text_color, font_name, font_size FROM annotations")]
+        "SELECT annot_type, text_color, fill_color, font_name, font_size"
+        " FROM annotations")]
     placements = [dict(r) for r in kb.con.execute(
         "SELECT a.annot_type, l.relative_label, l.offset_x_pct, l.offset_y_pct"
         " FROM links l JOIN annotations a ON a.id = l.annotation_id"
@@ -220,8 +233,10 @@ def _row_as_annotation(row: dict) -> Annotation:
     import json
     from .models import BBox
     color = json.loads(row["text_color"]) if row.get("text_color") else None
+    fill = json.loads(row["fill_color"]) if row.get("fill_color") else None
     return Annotation(page=0, text="x", bbox=BBox.of((0, 0, 1, 1)),
                       annot_type=row["annot_type"] or "",
                       text_color=tuple(color) if color else None,
+                      fill_color=tuple(fill) if fill else None,
                       font_name=row.get("font_name") or "",
                       font_size=row.get("font_size") or 0.0)

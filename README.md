@@ -78,7 +78,7 @@ for m in apply_template(template, parse_pdf("blank_crf.pdf")):
 | [acrf_parser/linking.py](acrf_parser/linking.py) | **Phase 6** — scored, row-aware field↔annotation links |
 | [acrf_parser/kb.py](acrf_parser/kb.py) | **Phase 7** — SQLite knowledge base |
 | [acrf_parser/template.py](acrf_parser/template.py) | **Phase 8** — template creation and application |
-| [acrf_parser/style.py](acrf_parser/style.py) | house style — colour/font/placement conventions measured from a corpus |
+| [acrf_parser/style.py](acrf_parser/style.py) | house style — text colour, box fill, font and placement conventions measured from a corpus |
 | [acrf_parser/prefill.py](acrf_parser/prefill.py) | deterministic pre-fill — five scored tiers, offline, no model |
 | [acrf_parser/staging.py](acrf_parser/staging.py) | **Phase 9a/b** — the staging workbook |
 | [acrf_parser/importer.py](acrf_parser/importer.py) | **Phase 9c** — reading the workbook back, validated per row |

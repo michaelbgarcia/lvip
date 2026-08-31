@@ -98,6 +98,10 @@ class ImportedRow:
     suggested_annotation: str = ""
     match_tier: str = ""
     text_color: tuple[float, float, float] | None = None
+    # The box's background. Blank is a decision, not an omission - a study whose
+    # house style draws unfilled boxes leaves this empty and gets a transparent
+    # box with the same black border as every other one.
+    fill_color: tuple[float, float, float] | None = None
     font_name: str = ""
     font_size: float = 0.0
     placement: str = ""
@@ -437,15 +441,8 @@ def _foreign_domain(variable: str, domain: str) -> str:
 
 
 def _check_formatting(r, raw, add) -> None:
-    color = _text(raw.get("color_rgb"))
-    if color:
-        m = _HEX.match(color)
-        if m:
-            h = m.group(1)
-            r.text_color = tuple(round(int(h[i:i + 2], 16) / 255, 3) for i in (0, 2, 4))
-        else:
-            add("color_rgb", ERROR, "BAD_COLOR",
-                f"{color!r} is not a #RRGGBB colour")
+    r.text_color = _color(raw, "color_rgb", add)
+    r.fill_color = _color(raw, "fill_rgb", add)
     r.font_name = _text(raw.get("font_name"))
 
     size = raw.get("font_size")
@@ -467,6 +464,19 @@ def _check_formatting(r, raw, add) -> None:
     if r.status == APPROVED and not r.text_color:
         add("color_rgb", ERROR, "MISSING_COLOR",
             "approved rows need a colour to draw with")
+
+
+def _color(raw, column: str, add) -> tuple[float, float, float] | None:
+    """A #RRGGBB cell as RGB floats. Empty means "no colour", which is allowed."""
+    value = _text(raw.get(column))
+    if not value:
+        return None
+    m = _HEX.match(value)
+    if not m:
+        add(column, ERROR, "BAD_COLOR", f"{value!r} is not a #RRGGBB colour")
+        return None
+    h = m.group(1)
+    return tuple(round(int(h[i:i + 2], 16) / 255, 3) for i in (0, 2, 4))
 
 
 def _check_geometry(r, geometry, add) -> None:

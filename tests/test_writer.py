@@ -288,3 +288,45 @@ def test_report_summary(approved, blank_doc, tmp_path):
     report = write_annotations(blank_doc.path, approved.rows, tmp_path / "s.pdf")
     d = report.to_dict()
     assert d["written"] == 9 and d["skipped"] == 5 and d["adjusted"] == 0
+
+
+def test_the_fill_from_history_lands_on_the_page(approved, blank_doc, tmp_path):
+    """The house style's background is drawn, and reads back as a fill - not as
+    the text colour, and not as a response control on the blank form."""
+    out = tmp_path / "filled.pdf"
+    write_annotations(blank_doc.path, approved.rows, out)
+    again = parse_pdf(out)
+    a = next(a for a in again.iter_annotations() if a.text == "BRTHDTC")
+    assert a.fill_color == (1.0, 0.98, 0.769)        # #FFFAC4, 8-bit round trip
+    assert a.text_color == (0.851, 0.102, 0.102)
+    assert a.fill_color != a.text_color
+    page = again.page(a.page)
+    assert not any(c.bbox.inside_frac(a.bbox) >= 0.9 for c in page.controls)
+
+
+def test_every_box_is_drawn_with_a_black_border(approved, blank_doc, tmp_path):
+    """PyMuPDF strokes a FreeText's border in the text colour; we override it."""
+    out = tmp_path / "bordered.pdf"
+    write_annotations(blank_doc.path, approved.rows, out)
+    pdf = pymupdf.open(out)
+    strokes = []
+    for page in pdf:
+        for annot in page.annots():
+            assert annot.border["width"] > 0
+            kind, value = pdf.xref_get_key(annot.xref, "AP/N")
+            stream = pdf.xref_stream(int(value.split()[0])).decode()
+            strokes += [ln for ln in stream.splitlines() if ln.endswith("RG")]
+    assert strokes and set(strokes) == {"0 0 0 RG"}
+
+
+def test_a_row_with_no_fill_still_gets_its_border(blank_doc, tmp_path):
+    """An unfilled house style is a real one - the box just has no background."""
+    out = tmp_path / "unfilled.pdf"
+    row = _row("p1f1", 0.14)
+    row.fill_color = None
+    write_annotations(blank_doc.path, [row], out)
+    a = next(iter(parse_pdf(out).iter_annotations()))
+    assert a.fill_color is None
+    pdf = pymupdf.open(out)
+    page = pdf[0]
+    assert page.first_annot.border["width"] > 0

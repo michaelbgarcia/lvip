@@ -11,6 +11,10 @@ from pathlib import Path
 import pymupdf
 
 RED = (0.85, 0.1, 0.1)
+# The study's house style is red on pale yellow. Two colours, not one: a corpus
+# where the fill and the text colour differ is the only one that can catch a
+# pipeline collapsing them back together.
+YELLOW = (1.0, 0.98, 0.77)
 
 # (form title, [(label, y)], [(annotation text, x, y)])
 PAGES = [
@@ -66,9 +70,10 @@ def _disposition_page(doc: pymupdf.Document) -> None:
         ("DS=Disposition", pymupdf.Rect(60, 20, 240, 40)),
         ('SUPPDS.QVAL when QNAM = "PROTVER"', pymupdf.Rect(250, 130, 420, 160)),  # in gutter
     ):
-        a = page.add_freetext_annot(rect, text, fontsize=9, text_color=RED)
+        a = page.add_freetext_annot(rect, text, fontsize=9, text_color=RED,
+                                    fill_color=YELLOW)
         a.set_info(content=text, title="annotator")
-        a.update()
+        a.update(text_color=RED, fill_color=YELLOW)
 
 
 # Page 5 reproduces an Eligibility Criteria page: right-aligned criteria, uniform
@@ -109,9 +114,10 @@ def _eligibility_page(doc: pymupdf.Document) -> None:
         ("EL=Eligibility", pymupdf.Rect(60, 10, 200, 28)),
         ("See Page 7", pymupdf.Rect(250, 30, 340, 50)),
     ):
-        a = page.add_freetext_annot(rect, text, fontsize=9, text_color=RED)
+        a = page.add_freetext_annot(rect, text, fontsize=9, text_color=RED,
+                                    fill_color=YELLOW)
         a.set_info(content=text, title="annotator")
-        a.update()
+        a.update(text_color=RED, fill_color=YELLOW)
 
 
 def build(path: str | Path) -> Path:
@@ -127,9 +133,10 @@ def build(path: str | Path) -> Path:
             page.draw_rect(pymupdf.Rect(180, y - 11, 300, y + 4))   # answer box
         for text, x, y in annots:
             rect = pymupdf.Rect(x, y - 12, x + 210, y + 4)
-            a = page.add_freetext_annot(rect, text, fontsize=8, text_color=RED)
+            a = page.add_freetext_annot(rect, text, fontsize=8, text_color=RED,
+                                        fill_color=YELLOW)
             a.set_info(content=text, title="annotator")
-            a.update()
+            a.update(text_color=RED, fill_color=YELLOW)
     _disposition_page(doc)
     _eligibility_page(doc)
     doc.save(path)
@@ -161,9 +168,10 @@ def build_second_study(path: str | Path) -> Path:
             page.draw_rect(pymupdf.Rect(180, y - 11, 300, y + 4))
         for text, x, y in annots:
             a = page.add_freetext_annot(pymupdf.Rect(x, y - 12, x + 210, y + 4),
-                                        text, fontsize=8, text_color=RED)
+                                        text, fontsize=8, text_color=RED,
+                                        fill_color=YELLOW)
             a.set_info(content=text, title="annotator")
-            a.update()
+            a.update(text_color=RED, fill_color=YELLOW)
     doc.save(path)
     doc.close()
     return path

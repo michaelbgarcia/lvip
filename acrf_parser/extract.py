@@ -22,6 +22,7 @@ from .normalize import clean
 _BOLD_FLAG = 1 << 4     # span flags bit for bold
 _RULE_MAX_THICK = 2.0   # a filled rect this thin is a ruled line, not a box
 _CTRL_MIN_SIDE = 4.0    # smaller than this is decoration, not an input control
+_ANNOT_COVER = 0.9      # a drawing this far inside an annotation rect is its own box
 
 # /DA ("default appearance") operators. A FreeText annotation's colour and font
 # live here, not in /C or /IC - `annot.colors` comes back empty for them, which
@@ -81,21 +82,31 @@ class ACRFParser:
         out.blocks, out.lines = self._blocks_and_lines(page)
         out.words = self._words(page)
         out.annotations = self._annotations(page)
-        out.rules, out.controls = self._graphics(page)
+        out.rules, out.controls = self._graphics(page, out.annotations)
         self._tag_annotation_text(out)
         return out                   # layout pass runs document-wide in parse_pdf
 
-    def _graphics(self, page: pymupdf.Page) -> tuple[list[Rule], list[Control]]:
+    def _graphics(self, page: pymupdf.Page,
+                  annotations: list[Annotation]) -> tuple[list[Rule], list[Control]]:
         """Split vector drawings into separators (rules) and response controls.
 
         Rules stop line grouping running across section boundaries; controls are
         the evidence that a column holds responses rather than questions.
+
+        An annotation's own background and border are vector drawings too - a
+        study that fills its markup boxes would otherwise hand every annotation
+        back as an answer box, and a page of markup would read as a page of
+        response controls. So drawings sitting inside an annotation rect are its
+        appearance, not the form's.
         """
         rules: list[Rule] = []
         controls: list[Control] = []
         w, h = page.rect.width or 1.0, page.rect.height or 1.0
+        annot_rects = [a.bbox for a in annotations]
         for d in page.get_drawings():
             box = BBox.of(d["rect"])
+            if any(box.inside_frac(r) >= _ANNOT_COVER for r in annot_rects):
+                continue
             kinds = {it[0] for it in d.get("items", [])}
             if box.height <= _RULE_MAX_THICK and box.width > _CTRL_MIN_SIDE:
                 rules.append(Rule(page.number + 1, box, "H", round(box.width / w, 4)))

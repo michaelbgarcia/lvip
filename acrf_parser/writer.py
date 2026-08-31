@@ -45,6 +45,7 @@ new path, so a bad run costs nothing.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field as dc_field
 from pathlib import Path
 from typing import Any, Iterable
@@ -68,6 +69,21 @@ MAX_ROW_STEPS = 4           # rows searched either side of the field's own row
 DUP_ROW_TOL = 12.0          # two fields this close vertically are one CRF row
 SIBLING_GAP_PT = 6.0        # gap between two annotations on the same field
 DEFAULT_SIZE = 8.0
+# Every annotation is drawn as a box with a black border; only the background
+# comes from the study's own history. A border makes the markup a discrete
+# object on a dense page - a reviewer can see where one statement ends and the
+# printed form begins - and black is the one colour that reads over any fill.
+BORDER_COLOR = b"0 0 0 RG"      # PDF stroking colour, black
+BORDER_WIDTH = 0.75
+
+# PyMuPDF strokes a FreeText's border in the *text* colour and offers no way to
+# say otherwise (`border_color` is rejected unless the annotation is rich text,
+# which would take the text out of the base-14 fonts the placement arithmetic
+# measures with). The generated appearance stream says it in one operator, so
+# the border colour is set there: an uppercase RG is the stroking colour, and in
+# a FreeText appearance the only thing stroked is the box. Text uses lowercase
+# `rg` and is untouched.
+_STROKE_RGB = re.compile(rb"[\d.]+\s+[\d.]+\s+[\d.]+\s+RG")
 DEFAULT_AUTHOR = "acrf_parser"
 
 # PyMuPDF only ships the base-14 fonts for annotation appearances. A study whose
@@ -495,8 +511,32 @@ def _draw(page: pymupdf.Page, row: ImportedRow, placement: Placement,
         fontsize=row.font_size or DEFAULT_SIZE,
         fontname=font,
         text_color=row.text_color or (0, 0, 0),
+        fill_color=row.fill_color,          # None = transparent, the PDF default
+        border_width=BORDER_WIDTH,
     )
     # /Contents is what the parser reads first, so a written annotation is
     # re-readable by the same pipeline that produced it.
     annot.set_info(content=placement.text, title=author)
-    annot.update()
+    # update() regenerates the appearance stream and drops any styling it is not
+    # handed, so the colours are repeated here.
+    annot.update(fill_color=row.fill_color, text_color=row.text_color or (0, 0, 0))
+    _blacken_border(page.parent, annot)
+
+
+def _blacken_border(pdf: pymupdf.Document, annot: pymupdf.Annot) -> None:
+    """Repaint the box outline black in the annotation's appearance stream.
+
+    A no-op if the stream carries no stroking colour - MuPDF's default stroke is
+    already black, so the border comes out right either way.
+    """
+    try:
+        kind, value = pdf.xref_get_key(annot.xref, "AP/N")
+        if kind != "xref":
+            return
+        xref = int(value.split()[0])
+        stream = pdf.xref_stream(xref)
+        patched = _STROKE_RGB.sub(BORDER_COLOR, stream)
+        if patched != stream:
+            pdf.update_stream(xref, patched)
+    except Exception:
+        pass                    # a red border is a cosmetic loss, not a failed write

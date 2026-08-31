@@ -96,8 +96,8 @@ just want to inspect one PDF's extraction.
 ```
 
 Runs extraction (phases 1–6) plus **9a** (deterministic pre-fill, five scored
-tiers) and **9b** (staging workbook build), reading `house style` (colour /
-font / placement conventions) from the corpus too.
+tiers) and **9b** (staging workbook build), reading `house style` (text colour,
+box fill, font, placement conventions) from the corpus too.
 
 | Artifact | Phase | What it is |
 |---|---|---|
@@ -140,7 +140,7 @@ approves/rejects suggestions in the XLSX:
 | Artifact | Phase | What it is |
 |---|---|---|
 | `output/reviewed.reviewed.xlsx` | 9c | review copy — every row's validation verdict, `import_issues` column naming what's wrong on bad rows |
-| `output/blank_acrf.annotated.pdf` | 10 | (with `--write-annotations`) the CRF with approved rows drawn on, colour/font/placement from house style, collisions nudged and off-page boxes pulled back |
+| `output/blank_acrf.annotated.pdf` | 10 | (with `--write-annotations`) the CRF with approved rows drawn on as black-bordered boxes, colour/fill/font/placement from house style, collisions nudged and off-page boxes pulled back |
 | `output/kb.sqlite` (updated) | 11 | (with `--learn`) approved rows fed back in; rejections stored too, so they're never re-suggested |
 
 Command exits `1` if any row has a validation error — check

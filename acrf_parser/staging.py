@@ -67,8 +67,8 @@ ANNOT_TYPES = ["VARIABLE", "CONSTANT_ASSIGNMENT", "SUPP_QUALIFIER", "NOT_SUBMITT
 # the second statement - no other column tells the importer that is what they
 # meant.
 EDITABLE = ("annot_seq", "form_name", "final_variable", "final_annotation",
-            "final_annot_type", "status", "reviewer_note", "color_rgb", "font_name",
-            "font_size", "placement")
+            "final_annot_type", "status", "reviewer_note", "color_rgb", "fill_rgb",
+            "font_name", "font_size", "placement")
 
 HEADERS = [
     ("row_id", 10), ("annot_seq", 10), ("form_name", 22), ("page", 6), ("field_text", 42),
@@ -78,7 +78,8 @@ HEADERS = [
     ("known_aliases", 26),
     ("final_variable", 16), ("final_annotation", 26), ("final_annot_type", 18),
     ("status", 15), ("reviewer_note", 30),
-    ("color_rgb", 14), ("font_name", 11), ("font_size", 10), ("placement", 17),
+    ("color_rgb", 14), ("fill_rgb", 12), ("font_name", 11), ("font_size", 10),
+    ("placement", 17),
 ]
 
 FILL_AUTO = PatternFill("solid", fgColor="E8F5E9")      # settled: nothing to do
@@ -161,6 +162,9 @@ def _row(doc, page, fld, result, best, seq: int, house: HouseStyle) -> StagingRo
             "status": status,
             "reviewer_note": "",
             "color_rgb": _hex(rule.text_color),
+            # Blank when the corpus draws no background: an unfilled box is a
+            # real house style, not a missing value to be invented.
+            "fill_rgb": _hex(rule.fill_color),
             "font_name": rule.font_name,
             "font_size": rule.font_size or "",
             "placement": rule.placement,
@@ -273,7 +277,8 @@ def _geometry_sheet(wb: Workbook, rows: list[StagingRow]) -> None:
 def _style_sheet(wb: Workbook, house: HouseStyle) -> None:
     """The derived house style, with agreement, so unsettled rules get decided once."""
     ws = wb.create_sheet(SHEET_STYLE)
-    ws.append(["scope", "samples", "color_rgb", "color_agreement", "font_name",
+    ws.append(["scope", "samples", "color_rgb", "color_agreement",
+               "fill_rgb", "fill_agreement", "fill_samples", "font_name",
                "font_size", "size_agreement", "placement", "placement_agreement",
                "offset_x_pct", "offset_y_pct", "settled", "evidence"])
     for cell in ws[1]:
@@ -281,13 +286,15 @@ def _style_sheet(wb: Workbook, house: HouseStyle) -> None:
         cell.fill = FILL_HEADER
     for rule in [house.default, *[house.by_type[k] for k in sorted(house.by_type)]]:
         ws.append([rule.scope, rule.samples, _hex(rule.text_color), rule.color_agreement,
+                   _hex(rule.fill_color), rule.fill_agreement, rule.fill_samples,
                    rule.font_name, rule.font_size, rule.size_agreement, rule.placement,
                    rule.placement_agreement, rule.offset_x_pct, rule.offset_y_pct,
                    "yes" if rule.settled else "NO", "; ".join(rule.evidence)])
         if not rule.settled:
             for cell in ws[ws.max_row]:
                 cell.fill = FILL_REVIEW
-    for i, w in enumerate([22, 9, 11, 15, 11, 10, 14, 16, 18, 13, 13, 9, 70], start=1):
+    for i, w in enumerate([22, 9, 11, 15, 11, 13, 12, 11, 10, 14, 16, 18, 13, 13, 9, 70],
+                          start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = "A2"
 

@@ -114,3 +114,25 @@ def test_summary(house):
     s = S.summarize_style(house)
     assert s["font"] == "Helv 8.0pt" and s["settled"] is True
     assert "DOMAIN_HEADER" in s["unsettled_scopes"]
+
+
+def test_fill_is_measured_alongside_text_colour(house):
+    """The corpus is red on pale yellow, and the style must carry both."""
+    rule = house.default
+    assert rule.text_color == (0.85, 0.1, 0.1)
+    assert rule.fill_color == (1.0, 0.98, 0.77)
+    assert rule.fill_agreement == 1.0 and rule.fill_samples == rule.samples
+
+
+def test_fill_agreement_counts_only_filled_boxes():
+    """Three yellow boxes in a corpus of a hundred is not a yellow house style."""
+    from acrf_parser.models import Annotation, BBox
+    from acrf_parser.style import _rule
+    annots = [Annotation(page=1, text="X", bbox=BBox.of((0, 0, 1, 1)),
+                         annot_type="VARIABLE",
+                         fill_color=(1.0, 1.0, 0.0) if i < 3 else None)
+              for i in range(100)]
+    rule = _rule("VARIABLE", annots, [])
+    assert rule.fill_color == (1.0, 1.0, 0.0)
+    assert rule.fill_samples == 3 and rule.samples == 100
+    assert "3 filled box(es)" in "; ".join(rule.evidence)
