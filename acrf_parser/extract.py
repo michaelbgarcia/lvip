@@ -31,6 +31,13 @@ _DA_RGB = re.compile(r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+rg\b", re.I)
 _DA_GRAY = re.compile(r"(?<![\d.])([\d.]+)\s+g\b")
 _DA_CMYK = re.compile(r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+k\b", re.I)
 
+# Appearance-stream scanning (see _appearance_fill). Content-stream operators
+# are postfix: operands accumulate, then one token consumes them.
+_NUMBER = re.compile(r"^[-+]?(?:\d+\.?\d*|\.\d+)$")
+_FILL_OPS = {"f", "F", "f*", "b", "b*", "B", "B*"}   # ops that paint an interior
+_PATH_END_OPS = {"n", "S", "s", "W", "W*"}           # path discarded or clipped/stroked
+_FILL_MIN_COVER = 0.5   # a fill smaller than half the box is decoration, not background
+
 
 class ACRFParser:
     """Deterministic PDF extractor. One instance per PDF file."""
@@ -166,6 +173,7 @@ class ACRFParser:
             content = clean(info.get("content", ""))
             text = content or self._annot_appearance_text(a)
             style = parse_da(self._annot_da(page.parent, a.xref) or fallback)
+            fill, fill_source = self._annot_fill(page.parent, a)
             annots.append(Annotation(
                 page=page.number + 1,
                 text=text,
@@ -175,6 +183,8 @@ class ACRFParser:
                 content=content,
                 title=clean(info.get("title", "")),
                 color=self._annot_color(a),
+                fill_color=fill,
+                fill_source=fill_source,
                 text_color=style["text_color"],
                 font_name=style["font_name"],
                 font_size=style["font_size"],
@@ -218,9 +228,88 @@ class ACRFParser:
 
     @staticmethod
     def _annot_color(a: pymupdf.Annot) -> tuple[float, ...] | None:
-        colors = a.colors or {}
-        c = colors.get("stroke") or colors.get("fill")
+        """The annotation's /C entry - its border/background colour key."""
+        c = (a.colors or {}).get("stroke")
         return tuple(round(float(v), 3) for v in c) if c else None
+
+    @classmethod
+    def _annot_fill(cls, pdf: pymupdf.Document, a: pymupdf.Annot) -> tuple[tuple[float, ...] | None, str]:
+        """The box's background colour, and where it was found.
+
+        Three places hold it, and a study may use any of them:
+
+        * `/IC` (interior colour) - the spec's answer, but many tools omit it;
+        * the appearance stream, which is what a reader actually paints and so
+          is the only reliable source for a highlight drawn as `1 1 0 rg ... re f`;
+        * `/C`, which for a FreeText annotation *is* the background (the text
+          colour lives in /DA), so a red-on-yellow box with only /C set is
+          yellow, not red - reading /C as "the colour" is what makes fill and
+          text colour look identical.
+
+        Returns `(rgb, "IC" | "APPEARANCE" | "C")`, or `(None, "")`.
+        """
+        ic = (a.colors or {}).get("fill")
+        if ic:
+            return tuple(round(float(v), 3) for v in ic), "IC"
+        painted = cls._appearance_fill(pdf, a)
+        if painted:
+            return painted, "APPEARANCE"
+        stroke = (a.colors or {}).get("stroke")
+        if stroke and (a.type[1] if a.type else "") == "FreeText":
+            return tuple(round(float(v), 3) for v in stroke), "C"
+        return None, ""
+
+    @classmethod
+    def _appearance_fill(cls, pdf: pymupdf.Document, a: pymupdf.Annot) -> tuple[float, ...] | None:
+        """Background colour painted by the annotation's own appearance stream.
+
+        Interprets just enough of the content stream to answer "what colour is
+        the largest filled rectangle?": non-stroking colour operators (`rg`/`g`/
+        `k`), rectangle paths, and the fill operators. A fill covering less than
+        `_FILL_MIN_COVER` of the box is ignored - that is an underline or a
+        glyph, not the box's background.
+        """
+        stream = cls._appearance_stream(pdf, a.xref)
+        if not stream:
+            return None
+        box_area = abs(a.rect.width * a.rect.height) or 1.0
+        color: tuple[float, ...] | None = None
+        best: tuple[tuple[float, ...] | None, float] = (None, 0.0)
+        area = 0.0                       # area of rectangles in the current path
+        ops: list[float] = []
+        for tok in stream.split():
+            if _NUMBER.match(tok):
+                ops.append(float(tok))
+                continue
+            if tok == "rg" and len(ops) >= 3:
+                color = tuple(round(v, 3) for v in ops[-3:])
+            elif tok == "g" and ops:
+                v = round(ops[-1], 3)
+                color = (v, v, v)
+            elif tok == "k" and len(ops) >= 4:
+                c, m, y, k = ops[-4:]
+                color = tuple(round((1 - v) * (1 - k), 3) for v in (c, m, y))
+            elif tok == "re" and len(ops) >= 4:
+                area += abs(ops[-2] * ops[-1])
+            elif tok in _FILL_OPS:
+                if color is not None and area > best[1]:
+                    best = (color, area)
+                area = 0.0
+            elif tok in _PATH_END_OPS:
+                area = 0.0
+            ops = []
+        return best[0] if best[1] / box_area >= _FILL_MIN_COVER else None
+
+    @staticmethod
+    def _appearance_stream(pdf: pymupdf.Document, xref: int) -> str:
+        """Decoded /AP /N content stream, or "" if the annotation has none."""
+        try:
+            kind, value = pdf.xref_get_key(xref, "AP/N")
+            if kind != "xref":
+                return ""
+            return pdf.xref_stream(int(value.split()[0])).decode("latin-1", "replace")
+        except Exception:
+            return ""
 
 
 # ---- convenience ----------------------------------------------------------

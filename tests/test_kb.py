@@ -116,3 +116,33 @@ def test_annotations_are_queryable_by_variable(db):
     rows = db.con.execute(
         "SELECT text, page FROM annotations WHERE variable = 'MHENRF'").fetchall()
     assert [(r["text"], r["page"]) for r in rows] == [("MHENRF=ONGOING", 2)]
+
+
+def test_kb_stores_annotation_fill(tmp_path, doc):
+    """Appearance is persisted so house style can be derived without re-parsing."""
+    from acrf_parser import kb as kbmod
+    path = kbmod.build_kb(doc, tmp_path / "fill.db")
+    con = kbmod.connect(path)
+    try:
+        cols = {r["name"] for r in con.execute("PRAGMA table_info(annotations)")}
+        assert {"fill_color", "fill_source"} <= cols
+    finally:
+        con.close()
+
+
+def test_kb_migrates_an_older_database(tmp_path, doc):
+    """A corpus created before fill was captured must keep working."""
+    import sqlite3
+    from acrf_parser import kb as kbmod
+    path = tmp_path / "old.db"
+    con = kbmod.connect(path)
+    con.execute("ALTER TABLE annotations DROP COLUMN fill_color")
+    con.execute("ALTER TABLE annotations DROP COLUMN fill_source")
+    con.commit()
+    con.close()
+    kbmod.build_kb(doc, path)           # re-open runs the migration, then inserts
+    con = sqlite3.connect(path)
+    try:
+        assert con.execute("SELECT COUNT(*) FROM annotations").fetchone()[0] > 0
+    finally:
+        con.close()

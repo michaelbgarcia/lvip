@@ -215,7 +215,13 @@ class Annotation:
     author: str = ""
     content: str = ""                 # annot /Contents
     title: str = ""                   # annot /T (author field)
-    color: tuple[float, ...] | None = None
+    color: tuple[float, ...] | None = None       # annot /C
+    # The box's background, resolved from /IC, the appearance stream or /C - see
+    # extract.ACRFParser._annot_fill. Kept apart from `text_color` because a
+    # house style is a *pair* (red on yellow), and /C alone cannot tell them
+    # apart: for a FreeText annotation /C is the fill and /DA carries the text.
+    fill_color: tuple[float, ...] | None = None
+    fill_source: str = ""             # IC | APPEARANCE | C, blank when unfilled
     # Rendered appearance, read from the /DA string (see extract.parse_da).
     # This is the raw material for house-style derivation: an aCRF's colour and
     # font conventions are measurable facts about the corpus, not judgement calls.

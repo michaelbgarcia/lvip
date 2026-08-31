@@ -78,3 +78,46 @@ def test_bbox_geometry():
     assert a.v_overlap(b) == 0.5 and a.h_overlap(b) == 0.5
     assert a.merge(b).as_tuple() == (0, 0, 15, 15)
     assert BBox.of((1, 1, 2, 2)).inside_frac(a) == 1.0
+
+
+def _fill_pdf(path):
+    """A CRF with the three ways a study can colour an annotation's background."""
+    import pymupdf
+    d = pymupdf.open()
+    page = d.new_page()
+    page.insert_text((72, 72), "Date of birth")
+    a = page.add_freetext_annot(pymupdf.Rect(200, 60, 360, 80), "BRTHDTC",
+                                fontsize=8, text_color=(0.85, 0.1, 0.1),
+                                fill_color=(1, 1, 0.6))          # painted in /AP
+    a.set_info(content="BRTHDTC")
+    a.update(fill_color=(1, 1, 0.6), text_color=(0.85, 0.1, 0.1))
+    sq = page.add_rect_annot(pymupdf.Rect(200, 100, 360, 120))    # /IC
+    sq.set_colors(stroke=(0, 0, 0), fill=(0.8, 0.9, 1))
+    sq.update()
+    d.save(path)
+    return path
+
+
+def test_annotation_fill_is_separate_from_text_colour(tmp_path):
+    """Red-on-yellow is two facts. Reading /C as "the colour" collapses them."""
+    from acrf_parser import parse_pdf
+    doc = parse_pdf(_fill_pdf(tmp_path / "fill.pdf"))
+    free = next(a for a in doc.iter_annotations() if a.subtype == "FreeText")
+    assert free.fill_color == (1.0, 1.0, 0.6) and free.fill_source == "APPEARANCE"
+    assert free.text_color == (0.85, 0.1, 0.1)
+    assert free.fill_color != free.text_color
+
+
+def test_interior_colour_is_the_fill(tmp_path):
+    from acrf_parser import parse_pdf
+    doc = parse_pdf(_fill_pdf(tmp_path / "fill.pdf"))
+    sq = next(a for a in doc.iter_annotations() if a.subtype == "Square")
+    assert sq.fill_color == (0.8, 0.9, 1.0) and sq.fill_source == "IC"
+    assert sq.color == (0.0, 0.0, 0.0)      # /C is the border here, not the fill
+
+
+def test_unfilled_annotation_reports_no_fill(doc):
+    """The sample study draws no background: absent must not be guessed at."""
+    a = next(a for a in doc.iter_annotations() if a.text == "BRTHDTC")
+    assert a.fill_color is None and a.fill_source == ""
+    assert a.text_color == (0.85, 0.1, 0.1)

@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.7.32">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+
+<title>readme</title>
+<style>
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+/* CSS for syntax highlighting */
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+  }
+pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+</style>
+
+
+<script src="README_files/libs/clipboard/clipboard.min.js"></script>
+<script src="README_files/libs/quarto-html/quarto.js" type="module"></script>
+<script src="README_files/libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="README_files/libs/quarto-html/popper.min.js"></script>
+<script src="README_files/libs/quarto-html/tippy.umd.min.js"></script>
+<script src="README_files/libs/quarto-html/anchor.min.js"></script>
+<link href="README_files/libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="README_files/libs/quarto-html/quarto-syntax-highlighting-37eea08aefeeee20ff55810ff984fec1.css" rel="stylesheet" id="quarto-text-highlighting-styles">
+<script src="README_files/libs/bootstrap/bootstrap.min.js"></script>
+<link href="README_files/libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="README_files/libs/bootstrap/bootstrap-81267100e462c21b3d6c0d5bf76a3417.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="light">
+
+
+</head>
+
+<body class="fullcontent quarto-light">
+
+<div id="quarto-content" class="page-columns page-rows-contents page-layout-article">
+
+<main class="content" id="quarto-document-content">
+
+
+
+
+<section id="acrf-parser" class="level1">
+<h1>aCRF Parser</h1>
+<p>Deterministic parser for annotated Case Report Forms. Extracts the <code>(form, field_text) → annotation</code> relationship from aCRF PDFs.</p>
+<p><strong>No AI, no LLMs, no embeddings, no OCR.</strong> Regex, layout analysis and confidence scoring only — every result is explainable.</p>
+<section id="setup" class="level2">
+<h2 class="anchored" data-anchor-id="setup">Setup</h2>
+<div class="sourceCode" id="cb1"><pre class="sourceCode bash code-with-copy"><code class="sourceCode bash"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="ex">python3</span> <span class="at">-m</span> venv .venv</span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="ex">.venv/bin/pip</span> install <span class="at">-r</span> requirements.txt</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</section>
+<section id="use" class="level2">
+<h2 class="anchored" data-anchor-id="use">Use</h2>
+<div class="sourceCode" id="cb2"><pre class="sourceCode bash code-with-copy"><code class="sourceCode bash"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="co"># generate a synthetic test aCRF (5 pages, 17 annotations)</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="ex">.venv/bin/python</span> tests/sample_pdf.py</span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a><span class="co"># parse: writes &lt;stem&gt;.extract.json + &lt;stem&gt;.template.json, and a knowledge base</span></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a><span class="ex">.venv/bin/python</span> <span class="at">-m</span> acrf_parser data/sample_acrf.pdf <span class="at">-o</span> output <span class="at">--db</span> output/kb.sqlite</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="sourceCode" id="cb3"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> acrf_parser <span class="im">import</span> parse_pdf</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>doc <span class="op">=</span> parse_pdf(<span class="st">"data/sample_acrf.pdf"</span>)          <span class="co"># runs every phase</span></span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>[f.name <span class="cf">for</span> f <span class="kw">in</span> doc.forms]                      <span class="co"># ['Demographics', 'Medical History', ...]</span></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>doc.form(<span class="st">"Medical History"</span>).pages                <span class="co"># [2, 3] - continuation page folded in</span></span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>page <span class="op">=</span> doc.page(<span class="dv">1</span>)</span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>page.content_text                                <span class="co"># page text WITHOUT annotation markup</span></span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a>[f.text <span class="cf">for</span> f <span class="kw">in</span> page.fields]                    <span class="co"># ['Date of birth', 'Age', 'Sex', 'Race']</span></span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a>dob <span class="op">=</span> doc.field(<span class="st">"p1f0"</span>)</span>
+<span id="cb3-13"><a href="#cb3-13" aria-hidden="true" tabindex="-1"></a>[doc.annotation(l.annotation_id).text <span class="cf">for</span> l <span class="kw">in</span> doc.links_for(dob.<span class="bu">id</span>)]   <span class="co"># ['BRTHDTC']</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<p>The relation, persisted and queried back:</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> acrf_parser <span class="im">import</span> build_kb, KnowledgeBase</span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>build_kb(doc, <span class="st">"kb.sqlite"</span>)                             <span class="co"># one study</span></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a>build_kb(parse_pdf(<span class="st">"other_study.pdf"</span>), <span class="st">"kb.sqlite"</span>)    <span class="co"># a second one accumulates</span></span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a><span class="cf">with</span> KnowledgeBase(<span class="st">"kb.sqlite"</span>) <span class="im">as</span> kb:</span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a>    kb.variable_for(<span class="st">"Medical History"</span>, <span class="st">"Start Date"</span>)   <span class="co"># 'MHSTDTC'</span></span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a>    kb.variable_for(<span class="st">"Adverse Events"</span>, <span class="st">"Start Date"</span>)    <span class="co"># 'AESTDTC' - never the same row</span></span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a>    kb.variable_for(<span class="st">"Demographics"</span>, <span class="st">"Start Date"</span>)      <span class="co"># None - the form is half the key</span></span>
+<span id="cb4-10"><a href="#cb4-10" aria-hidden="true" tabindex="-1"></a>    kb.disagreements()                                 <span class="co"># keys whose pages disagree</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<p>And re-applied to the <em>next</em> study’s unannotated CRF:</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> acrf_parser <span class="im">import</span> build_template, apply_template</span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>template <span class="op">=</span> build_template(doc)</span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> m <span class="kw">in</span> apply_template(template, parse_pdf(<span class="st">"blank_crf.pdf"</span>)):</span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a>    m.method, m.confidence, [a[<span class="st">"variable"</span>] <span class="cf">for</span> a <span class="kw">in</span> m.annotations]</span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a>    <span class="co"># ('EXACT_KEY', 0.95, ['BRTHDTC'])</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</section>
+<section id="layout" class="level2">
+<h2 class="anchored" data-anchor-id="layout">Layout</h2>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th>Path</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><a href="acrf_parser/models.py">acrf_parser/models.py</a></td>
+<td><code>BBox</code>, <code>Word</code>, <code>TextLine</code>, <code>TextGroup</code>, <code>Annotation</code>, <code>Rule</code>, <code>Control</code>, <code>Page</code>, <code>Document</code></td>
+</tr>
+<tr class="even">
+<td><a href="acrf_parser/extract.py">acrf_parser/extract.py</a></td>
+<td><strong>Phase 1</strong> — <code>ACRFParser.parse_pdf()</code></td>
+</tr>
+<tr class="odd">
+<td><a href="acrf_parser/layout.py">acrf_parser/layout.py</a></td>
+<td>layout pass — regions, columns, wrapped-line grouping, roles</td>
+</tr>
+<tr class="even">
+<td><a href="acrf_parser/forms.py">acrf_parser/forms.py</a></td>
+<td><strong>Phase 2</strong> — form identity, continuation pages, cross references</td>
+</tr>
+<tr class="odd">
+<td><a href="acrf_parser/fields.py">acrf_parser/fields.py</a></td>
+<td><strong>Phase 3</strong> — <code>Field</code> records, label cleanup, options, controls</td>
+</tr>
+<tr class="even">
+<td><a href="acrf_parser/annotations.py">acrf_parser/annotations.py</a></td>
+<td><strong>Phases 4–5</strong> — statement splitting and classification</td>
+</tr>
+<tr class="odd">
+<td><a href="acrf_parser/linking.py">acrf_parser/linking.py</a></td>
+<td><strong>Phase 6</strong> — scored, row-aware field↔︎annotation links</td>
+</tr>
+<tr class="even">
+<td><a href="acrf_parser/kb.py">acrf_parser/kb.py</a></td>
+<td><strong>Phase 7</strong> — SQLite knowledge base</td>
+</tr>
+<tr class="odd">
+<td><a href="acrf_parser/template.py">acrf_parser/template.py</a></td>
+<td><strong>Phase 8</strong> — template creation and application</td>
+</tr>
+<tr class="even">
+<td><a href="acrf_parser/style.py">acrf_parser/style.py</a></td>
+<td>house style — colour/font/placement conventions measured from a corpus</td>
+</tr>
+<tr class="odd">
+<td><a href="acrf_parser/prefill.py">acrf_parser/prefill.py</a></td>
+<td>deterministic pre-fill — five scored tiers, offline, no model</td>
+</tr>
+<tr class="even">
+<td><a href="acrf_parser/staging.py">acrf_parser/staging.py</a></td>
+<td><strong>Phase 9a/b</strong> — the staging workbook</td>
+</tr>
+<tr class="odd">
+<td><a href="acrf_parser/importer.py">acrf_parser/importer.py</a></td>
+<td><strong>Phase 9c</strong> — reading the workbook back, validated per row</td>
+</tr>
+<tr class="even">
+<td><a href="acrf_parser/writer.py">acrf_parser/writer.py</a></td>
+<td><strong>Phase 10</strong> — drawing approved annotations onto the PDF</td>
+</tr>
+<tr class="odd">
+<td><a href="acrf_parser/normalize.py">acrf_parser/normalize.py</a></td>
+<td>shared text normalization</td>
+</tr>
+<tr class="even">
+<td><a href="acrf_parser/cli.py">acrf_parser/cli.py</a></td>
+<td><code>python -m acrf_parser</code></td>
+</tr>
+<tr class="odd">
+<td><a href="tests/sample_pdf.py">tests/sample_pdf.py</a></td>
+<td>synthetic aCRF fixture generator</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="phases" class="level2">
+<h2 class="anchored" data-anchor-id="phases">Phases</h2>
+<ul class="task-list">
+<li><label><input type="checkbox" checked=""><strong>1 — PDF extraction.</strong> Pages, dimensions, text, blocks, lines, words, annotation objects + coordinates, ruled lines and response controls.</label></li>
+<li><label><input type="checkbox" checked=""><strong>Layout pass.</strong> Regions, column bands, wrapped-line grouping, question/response roles.</label></li>
+<li><label><input type="checkbox" checked=""><strong>2 — Form detection.</strong> <code>Form</code>, continuation pages, <code>See Page X</code>.</label></li>
+<li><label><input type="checkbox" checked=""><strong>3 — Field extraction.</strong> Raw + normalized text, item numbering, options, controls.</label></li>
+<li><label><input type="checkbox" checked=""><strong>4 — Annotation extraction.</strong> Ids, form association, multi-statement splitting.</label></li>
+<li><label><input type="checkbox" checked=""><strong>5 — Annotation classification.</strong> DOMAIN_HEADER, VARIABLE, CONSTANT_ASSIGNMENT, SUPP_QUALIFIER, NOT_SUBMITTED, CROSS_REFERENCE, DERIVATION_RULE, NOTE.</label></li>
+<li><label><input type="checkbox" checked=""><strong>6 — Field↔︎annotation linking.</strong> <code>link_score</code>, row-aware, never pure nearest-neighbour.</label></li>
+<li><label><input type="checkbox" checked=""><strong>7 — Knowledge base.</strong> SQLite: forms, fields, annotations, links.</label></li>
+<li><label><input type="checkbox" checked=""><strong>8 — Template creation.</strong> Coordinate-free templates, and applying one to a blank CRF.</label></li>
+<li><label><input type="checkbox" checked=""><strong>House style.</strong> <code>/DA</code> appearance capture, and colour/font/placement conventions derived from a corpus.</label></li>
+<li><label><input type="checkbox" checked=""><strong>9a — Deterministic pre-fill.</strong> Five scored tiers against the corpus, offline.</label></li>
+<li><label><input type="checkbox" checked=""><strong>9b — Staging XLSX export.</strong> Work sheet, locked geometry, house style, instructions.</label></li>
+<li><label><input type="checkbox" checked=""><strong>9c — Staging XLSX import.</strong> Per-row validation, review copy written back.</label></li>
+<li><label><input type="checkbox" checked=""><strong>10 — PDF annotation writing.</strong> Approved rows drawn, clamped, de-collided, re-readable.</label></li>
+<li><label><input type="checkbox" checked=""><strong>11 — The return edge.</strong> Approved rows fed back, with trust and rejections.</label></li>
+</ul>
+</section>
+<section id="the-blank-crf-workflow" class="level2">
+<h2 class="anchored" data-anchor-id="the-blank-crf-workflow">The blank-CRF workflow</h2>
+<div class="sourceCode" id="cb6"><pre class="sourceCode bash code-with-copy"><code class="sourceCode bash"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="co"># 1. ingest history once (per annotated study)</span></span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a><span class="ex">.venv/bin/python</span> <span class="at">-m</span> acrf_parser study_2023.pdf <span class="at">--db</span> corpus.sqlite <span class="at">--quiet</span></span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a><span class="co"># 2. stage a new blank CRF against everything learned so far</span></span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a><span class="ex">.venv/bin/python</span> <span class="at">-m</span> acrf_parser blank_crf.pdf <span class="at">-o</span> output <span class="at">--staging</span> <span class="at">--corpus</span> corpus.sqlite</span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true" tabindex="-1"></a><span class="co"># 3. read the reviewed workbook back, draw the approved rows onto the PDF, and</span></span>
+<span id="cb6-8"><a href="#cb6-8" aria-hidden="true" tabindex="-1"></a><span class="co">#    feed them into the corpus (exit 1 if any row is unwritable, so it can gate</span></span>
+<span id="cb6-9"><a href="#cb6-9" aria-hidden="true" tabindex="-1"></a><span class="co">#    a pipeline). --learn is opt-in: see "The return edge" below.</span></span>
+<span id="cb6-10"><a href="#cb6-10" aria-hidden="true" tabindex="-1"></a><span class="ex">.venv/bin/python</span> <span class="at">-m</span> acrf_parser blank_crf.pdf <span class="at">-o</span> output <span class="dt">\</span></span>
+<span id="cb6-11"><a href="#cb6-11" aria-hidden="true" tabindex="-1"></a>    <span class="at">--import-staging</span> reviewed.xlsx <span class="at">--corpus</span> corpus.sqlite <span class="dt">\</span></span>
+<span id="cb6-12"><a href="#cb6-12" aria-hidden="true" tabindex="-1"></a>    <span class="at">--write-annotations</span> <span class="at">--learn</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<p>The knowledge base is read at step 2 and written at step 3. It does three jobs on the way out — the mapping pre-fill, the house style that fills the formatting columns, and resolving each form’s SDTM domain — and on the way back it learns what the reviewer decided.</p>
+<p>Step 2 writes a workbook with one row per CRF field, pre-filled from history, each row carrying the tier that filled it and why. What history could not reach is marked <code>NEEDS_MAPPING</code> — that, and only that, is the agent’s work.</p>
+</section>
+<section id="design-notes" class="level2">
+<h2 class="anchored" data-anchor-id="design-notes">Design notes</h2>
+<p><strong>Wrapped text is regrouped before field extraction.</strong> PyMuPDF emits one <code>TextLine</code> per <em>rendered</em> line, so one CRF question arrives as six fields:</p>
+<pre><code>Please record / protocol / version on / which subject / is currently / enrolled:</code></pre>
+<p><a href="acrf_parser/layout.py">layout.py</a> merges them back into a single <code>TextGroup</code>, keeping the constituent lines so every merge is auditable. The merge test is a conjunction — same region, same column band, no ruled separator crossing, line gap ≤ <code>0.5 × font size</code>, same font size and weight, left/right/centre aligned, no <code>:</code>/<code>?</code> terminator on the previous line, and no answer control of its own. Line pitch is the workhorse: wrapped lines sit ~1.15× font size apart, separately drawn fields ~2×. When MuPDF already grouped lines into one block, that grouping is trusted and only pitch is re-checked.</p>
+<p><strong>MuPDF block numbers are never the grouping key.</strong> They are unreliable in both directions: on a right-aligned criteria page, MuPDF splits one criterion across blocks <code>[2, 3]</code> (its block detection keys on left-edge continuity, and ragged-left text has a jumping left edge), while elsewhere it merges freely. Grouping is geometric, so a block split costs nothing — <code>test_grouping_ignores_muPDF_block_splits</code> pins that behaviour.</p>
+<p><strong>Where pitch cannot help, controls mark the boundaries.</strong> On a criteria page every line is the same distance apart, within items <em>and</em> between them, so pitch says “merge everything”. What separates the items is the checkbox beside each one: a control row-aligned with a line, in its band and within an inch, means that line <em>starts</em> a field. Each control claims only the topmost line it sits beside, so a tall checkbox level with a whole wrapped label anchors line 1 rather than splitting the label. Numbering (<code>1.</code>, <code>a)</code>, <code>•</code>) is the second, redundant signal — the fixture page groups correctly with either one disabled.</p>
+<p><strong>A trailing colon ends a label, unless a list continues.</strong> <code>...currently enrolled:</code> closes a question, but <code>2. Have any of the following:</code> runs on into <code>Hypo/hyper-thyroidism;</code>. A following line that ends in <code>;</code> or <code>,</code> is treated as a list continuation; without that exception criterion 2 splits into two fragments.</p>
+<p><strong>Columns are detected, not assumed.</strong> <code>detect_columns</code> finds the widest whitespace gutter that most body lines are actually <em>paired across</em> — the pairing test is what stops a local gap between short labels reading as a column boundary. Two bands get the CRF prior (questions left, responses right); wider grids (log forms) fall back to per-band evidence; no clean gutter means single column. Every group is then tagged <code>region</code>, <code>column</code>, <code>role</code> (<code>QUESTION</code> / <code>RESPONSE_OPTION</code> / <code>SECTION_HEADER</code> / <code>PAGE_HEADER</code> / <code>FOOTER</code>) with a <code>role_confidence</code> and a <code>role_evidence</code> list. Nothing is ever filtered out — Phase 6 consumes <code>role</code> as a linking feature, and every call can be explained from its evidence.</p>
+<p>Two traps this handles, both real: - An annotation parked <em>in the gutter</em> (<code>SUPPDS.QVAL when QNAM = "PROTVER"</code>) would hide the column split, so detection runs on <code>content_lines</code> only. - A field label repeating across the pages of one form (<code>Condition</code> on both Medical History pages) is not a running header, so repeated text is only promoted to <code>HEADER</code>/<code>FOOTER</code> inside the page margin and after 3+ repeats. Phase 2 can strengthen this once form boundaries are known.</p>
+<p>Every threshold is a named constant at the top of its module — <code>GAP_RATIO</code>, <code>GUTTER_MIN_PT</code>, <code>CONTROL_NEAR_PT</code> in <a href="acrf_parser/layout.py">layout.py</a>; the <code>CONF_*</code> ladder in <a href="acrf_parser/forms.py">forms.py</a> and <a href="acrf_parser/annotations.py">annotations.py</a>; <code>W_ROW</code>, <code>ROW_SLACK_PT</code>, <code>MIN_LINK_SCORE</code> in <a href="acrf_parser/linking.py">linking.py</a>; <code>REL_TOL</code> in <a href="acrf_parser/template.py">template.py</a>. All of them are tuned against the synthetic fixture — recalibrate against a real study PDF before trusting new studies.</p>
+<p><strong>A page’s form comes from four signals, in order of how much they can be trusted.</strong> A printed title (<code>Form: Medical History</code>) settles it; failing that, a bold heading larger than the body; failing that, the domain-header annotation. The fixture’s Disposition page prints no title at all — <code>DS=Disposition</code> is the only thing that names it, which is why markup is a form-detection signal and not only a Phase 5 input. Cross references and inheritance are a <em>second</em> pass, because <code>See Page 7</code> on page 5 has to wait for page 7 to be named. <code>(continued)</code> is stripped from the name so a continuation page lands on its form rather than beside it, and a dangling <code>See Page 7</code> in a 5-page PDF stays <code>resolved=False</code> — a finding about the file, not something to discard.</p>
+<p><strong>A field keeps both its printed text and a key-able one.</strong> <code>raw_text</code> is what the page shows; <code>text</code> has the item number peeled into <code>item_number</code> and the trailing colon removed, so renumbering a criteria list does not invalidate every key on the page. Response options are not fields: <code>Original</code> / <code>Amendment 1-4</code> are one question’s codelist and attach to the question owning their row band — with their bboxes, since an option can carry markup of its own.</p>
+<p><strong>Answer controls are matched by row, not by radius.</strong> A CRF puts its answer boxes on a fixed left edge while labels vary in length, so <code>Age</code> sits 100pt from its box and <code>Date of birth</code> 66pt from the identical box; any fixed distance takes one and drops the other. What actually disqualifies a control is <em>another field’s label standing between it and this one</em>, plus the column gutter — the Disposition question must not claim the radio circles that belong to its options.</p>
+<p><strong>One annotation box is not always one statement.</strong> Annotators routinely write <code>AESTDTC AEENDTC</code> in a single box, and linking that as one thing maps two variables to one field. Only a <em>pure</em> variable list splits: anything with prose, an <code>=</code>, brackets or a <code>when</code> clause stays whole, so <code>SUPPDS.QVAL when QNAM = "PROTVER"</code> survives intact.</p>
+<p><strong>Classification order is the whole trick.</strong> <code>SUPPDS.QVAL when QNAM = "PROTVER"</code> contains an <code>=</code> and reads as a constant assignment unless SUPP is tested first. The one genuinely ambiguous shape is <code>XX=YYYY</code> — <code>DS=Disposition</code> is a domain header, <code>DS=COMPLETED</code> is a constant. A human-readable right side settles it; when both sides are code-shaped, the tie-breakers are the CDISC domain list and page position (a domain header is the first markup on its page), and the loser is recorded in the evidence rather than thrown away.</p>
+<p><strong>Linking is row-gated, scored and assigned — three separate defences against nearest-neighbour.</strong> Nearest-neighbour looks right on a clean page and is wrong everywhere else: markup for the last field in a column is nearer to the next section’s heading than to its own label. So an annotation must <em>share a row</em> with a field (or sit within <code>ROW_SLACK_PT</code> of one) to be a candidate at all; candidates are then scored on independent features — row overlap, markup to the right, domain agreement, proximity, response zone — and consumed strongest-first rather than by argmax. An annotation links once; a field takes at most one annotation <em>per type</em>, because a field legitimately carries a <code>VARIABLE</code> and a <code>SUPP_QUALIFIER</code> at once but two bare variables on one label means one belongs to the field below. Page 1 of the fixture has two annotations with no field beside them; both come back unlinked, which is the correct answer and the test that pins it. Losing candidates are kept with <code>rejected=True</code>, so a wrong link can be argued with instead of just re-run.</p>
+<p><strong>The knowledge base stores occurrences, not conclusions.</strong> <code>Condition</code> is printed on both pages of Medical History and annotated on only one. Both are rows; the <code>field_map</code> view folds them into the single answer, and <code>variants &gt; 1</code> surfaces the case where a form’s pages disagree instead of resolving it silently at write time. Keying is <code>(form_name, field_text)</code> throughout — the two-study fixture exists precisely so <code>Start Date → MHSTDTC</code> and <code>Start Date → AESTDTC</code> can be shown not to blend.</p>
+<p><strong>Templates hold no coordinates.</strong> Geometry is page-relative (<code>rel_x_pct</code>) or a word (<code>right_of_field</code>), and page numbers are offsets from the form’s first page, so Medical History being pages 2-3 here and 11-12 in the next study is not a difference. <code>test_nothing_is_stored_in_points</code> walks the whole document to pin it. One entry per key, occurrences merged, so the unannotated copy of <code>Condition</code> cannot shadow the annotated one.</p>
+<p><strong>Applying a template states its method rather than guessing.</strong> <code>EXACT_KEY</code> is form <em>and</em> field text; <code>POSITION</code> is the re-worded-label case, bounded by <code>REL_TOL</code>; <code>TEXT_ONLY</code> means the text matched under a <em>different</em> form and is a suggestion for a human, not an answer. The round-trip test strips every annotation from the fixture and re-applies the template — 13 of 14 fields come back by exact key. The fourteenth is the honest part: the Disposition page was named only by <code>DS=Disposition</code>, so with the markup gone the page is inherited by the form above it and its field can only match on text, under the wrong form, at 0.3. The method says so rather than reporting a confident answer.</p>
+<p><strong>Pre-fill is deterministic and runs before any model does.</strong> Five tiers, all scored, all explainable, all offline — <a href="acrf_parser/prefill.py">prefill.py</a> needs nothing but stdlib and SQLite:</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 50%">
+<col style="width: 50%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>tier</th>
+<th>fires when</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>EXACT_KEY</code></td>
+<td><code>(form, field_text)</code> seen before — the answer, not a guess</td>
+</tr>
+<tr class="even">
+<td><code>CROSS_FORM_CONSENSUS</code></td>
+<td>the label maps to one variable in <em>every</em> form that has used it</td>
+</tr>
+<tr class="odd">
+<td><code>DOMAIN_PATTERN</code></td>
+<td>SDTM’s naming convention, learned from the corpus</td>
+</tr>
+<tr class="even">
+<td><code>FUZZY_SAME_FORM</code></td>
+<td>same form, near-identical wording</td>
+</tr>
+<tr class="odd">
+<td><code>NEEDS_MAPPING</code></td>
+<td>nothing in history reaches it — the agent’s real job</td>
+</tr>
+</tbody>
+</table>
+<p><code>DOMAIN_PATTERN</code> is the one that generalises. Seeing <code>MHSTDTC</code> on a Medical History form teaches that the label “start date” plays the role <code>STDTC</code>; seeing <code>AESTDTC</code> confirms it across a second domain. A Concomitant Medications form is then pre-filled <code>CMSTDTC</code> although CM appears nowhere in the corpus. The convention belongs to SDTM; the corpus is only evidence of which labels map to which role, and a suffix attested by a single domain is treated as coincidence.</p>
+<p><code>CROSS_FORM_CONSENSUS</code> is where the corpus rates its own reliability. “Sex” maps to <code>SEX</code> on every form that has one, so the label alone is sufficient. “Start Date” maps to <code>MHSTDTC</code>, <code>AESTDTC</code> and <code>CMSTDTC</code>, so the label alone is <em>insufficient</em> — and that is discovered from the disagreement rather than declared in advance. Where forms disagree, no cross-form suggestion is offered and the reason is recorded.</p>
+<p><strong>Only <code>EXACT_KEY</code> can auto-approve.</strong> Every fuzzy tier lands as <code>NEEDS_REVIEW</code> whatever it scored, carrying the source study, the source label and the score, so a reviewer sees <em>“matched ‘Start Date’ from STUDY-XYZ Medical History at 0.86”</em> and not a bare variable name wearing the same clothes as a fact. A suggestion that is indistinguishable from a certainty is the failure mode that would make the whole pipeline untrustworthy.</p>
+<p>The similarity metric blends sequence ratio, containment and Jaccard over lightly stemmed tokens, because each alone fails a re-wording that really happens: “Conditions”/“Condition” scores 0.0 on raw token sets, and “Start Date” inside “Start Date of Condition” is punished by Jaccard for being short. The pair that matters is <code>"start date"</code> vs <code>"stop date"</code> — semantically opposite, and at 0.55 it sits just under the 0.6 floor. That margin is thin, and <code>test_opposites_stay_below_the_fuzzy_floor</code> exists to fail loudly if the floor is ever raised without re-checking it.</p>
+<p><strong>The staging workbook is shaped by who reads it.</strong> The agent gets one flat table with self-describing column names — no merged cells, no nesting. The human gets the match tier, score and source study <em>beside</em> the suggestion rather than in an audit log. The importer gets geometry, which is noise to the other two readers and must never be hand-edited, so it lives on a locked <code>Geometry</code> sheet keyed by <code>row_id</code>. Sheet protection is deliberately not switched on: it would stop Copilot writing at all. The locked flags record intent, and the importer is what enforces it — validation on the way back in, not a UI lock on the way out.</p>
+<p><strong>Validation is per row, not per workbook.</strong> One unparseable colour in row 200 must not reject the other 199 — the reviewer would fix it, re-import, and meet the next problem one round trip later. Every row carries its own verdict, the good ones import, and the bad ones come back naming their own problem so they can all be fixed in one pass. <code>write_review_copy</code> puts each message in an <code>import_issues</code> column <em>on the row that needs fixing</em>, because the reviewer is already in Excel and should not have to cross-reference a log by hand.</p>
+<p>Severity is split for the same reason. <code>ERROR</code> blocks the row — without a resolvable colour or geometry there is nothing to draw. <code>WARNING</code> lets it through flagged, which is the only sane treatment for a signal that is right most of the time.</p>
+<p><code>DOMAIN_MISMATCH</code> is the example worth keeping. The obvious test — “the variable does not start with the form’s domain” — is wrong: <code>DM</code>’s own variables carry no prefix, so <code>BRTHDTC</code>, <code>AGE</code> and <code>RACE</code> each raise a warning on the one form they belong to. Three false alarms in four teaches a reviewer to ignore the check, which costs more than the check is worth. What actually indicates a mistake is a variable wearing <em>another</em> domain’s code with a real suffix behind it — <code>DSTERM</code> on a Medical History form. The suffix-length test is what keeps <code>AGE</code> (“AG” + “E”) and <code>SEX</code> (“SE” + “X”) out, since both begin with letters that happen to be CDISC domain codes.</p>
+<p>Three silent failures the importer exists to catch:</p>
+<ul>
+<li><strong>A sorted or deleted row.</strong> <code>row_id</code> is the only thing tying a spreadsheet row to a position on the PDF. Rows are matched by it and never by position, so reversing the sheet changes nothing and a deleted row is an error rather than an off-by-one annotation.</li>
+<li><strong>An edited label.</strong> If <code>field_text</code> no longer matches the field its <code>row_id</code> points at, the row has stopped describing what it claims to.</li>
+<li><strong>An unevaluated formula.</strong> An agent that writes <code>=CONCAT(...)</code> into a file nobody opens in Excel leaves no cached value, and the cell reads as blank — which would otherwise import as “no decision” rather than as a problem.</li>
+</ul>
+<p>The declared annotation type is checked against the text by running <a href="acrf_parser/annotations.py">annotations.classify</a> over it, so the workbook cannot claim a type its own contents contradict — the importer validates with the same rules the parser reads with.</p>
+<p><strong>The return edge is ingested from the workbook, not from the PDF we just wrote.</strong> Re-parsing the output is the obvious way to close the loop and it quietly corrupts the corpus. A blank CRF has no domain-header annotations, so a page with no printed title is inherited by the form above it: the Disposition page reads as Medical History, and re-parsing relearns that mistake and files <code>DSTERM</code> under Medical History at 0.95 confidence — a machine error laundered into ground truth. The sheet has a <code>form_name</code> column, so that column is what is believed.</p>
+<p>Which meant <code>form_name</code> had to become editable. It was locked as evidence, and the one column that most needs human correction on a blank CRF was the one the reviewer could not touch. A change to it is recorded as <code>FORM_RENAMED</code> rather than accepted silently, because it changes the primary key.</p>
+<p><strong>Links carry how they were established.</strong> <code>HUMAN_APPROVED</code> outranks <code>GEOMETRIC</code>, and <code>PrefillIndex</code> breaks ties on trust before score, so a reviewer’s decision cannot lose to a lucky geometric match. Occurrences are still all kept — after the return edge the Disposition question has two, <code>DSTERM</code> from the reviewer and <code>SUPPDS.QVAL</code> from the original study — and the approved one simply ranks first.</p>
+<p><strong>Rejections are evidence too.</strong> A reviewer who turns down <code>MHENRF=ONGOING</code> has told you something the corpus had no other way to learn, and re-proposing it next study burns their trust in every other row on the sheet. Rejected rows are stored as <code>HUMAN_REJECTED</code> with the suggestion that was refused, and pre-fill zeroes any candidate matching one, saying so in its evidence.</p>
+<p><strong>Learning is opt-in.</strong> <code>--learn</code> is a flag, not a side effect of importing, because importing is also how you <em>check</em> a sheet before it is final. A knowledge base that quietly learned from a trial run would serve those rows back at full confidence with no record of where they came from, and KB writes are hard to undo.</p>
+<p>One honest limit: a form-name correction is per document. The knowledge is filed under the corrected name, but re-staging <em>the same</em> blank CRF still parses that page as Medical History, so the key does not match until a document identifies the form correctly. <code>test_approved_work_raises_the_next_run</code> asserts 5 → 2 rather than 5 → 0 for exactly this reason.</p>
+<p><strong>The pipeline is checked by reading its own output.</strong> <code>write_annotations</code> draws the approved rows onto a copy of the blank CRF; the test then parses that copy with the same parser — form detection, field extraction, classification and linking all running fresh — and requires every mapping the sheet specified to come back attached to the field it was specified for. Nine of nine round trip on the fixture, with colour, font and size intact. That is a stronger claim than any assertion about the writer’s internals: it says the thing we produced is the thing we can read.</p>
+<p>It also pins something easy to miss — annotations <em>we</em> wrote must be stripped from the text layer on re-parse, or the next study’s field extraction would read our own markup back as CRF labels. <code>test_written_annotations_are_stripped_from_the_text_layer</code> exists for that.</p>
+<p><strong>Placement is arithmetic; what arithmetic cannot settle gets reported.</strong> The workbook carries the field’s box and the house style’s offsets as page fractions, so a position is recovered by multiplying — no model, and identical output on every run. Two things it cannot decide alone:</p>
+<ul>
+<li><strong>A box that runs off the page.</strong> Long markup placed right of a label near the right margin will not fit. It is pulled back inside the page and the row records the move, because an annotation half off the page is worse than one a reviewer was told about.</li>
+<li><strong>Two annotations in the same place.</strong> Fields a fraction of a row apart collide. Rows are drawn top-to-bottom so a nudge always pushes into unclaimed space, the later one moves down, and it says so. Silently overprinted text is the failure a reviewer would only find by eye, on page 40.</li>
+</ul>
+<p>Only <code>ImportedRow.ready</code> rows are drawn — validated <em>and</em> signed off, never one without the other. A font the PDF cannot embed is substituted for a base-14 face and the substitution is recorded rather than passed off as the real thing.</p>
+<p><strong>Formatting conventions are measured, not inferred.</strong> A FreeText annotation’s colour and font are not in <code>/C</code> or <code>/IC</code> — <code>annot.colors</code> comes back empty for them. They live in the <code>/DA</code> default-appearance string (<code>0.85 0.1 0.1 rg /Helv 8.0 Tf</code>), which <a href="acrf_parser/extract.py">extract.parse_da</a> parses into RGB, font and size, normalising grayscale and CMYK so two spellings of one colour do not read as disagreement. <a href="acrf_parser/style.py">style.py</a> then counts those over a corpus to produce a <code>StyleRule</code> per annotation type.</p>
+<p>Every rule carries <code>samples</code> and <code>agreement</code> — the share that matched the modal value — because the useful output is not an average but a verdict on whether the corpus agrees. The fixture renders domain headers at 8pt on three pages and 9pt on two: agreement <code>0.50</code>, <code>settled=False</code>, escalated to a human. Averaging would have produced 8.5pt, a size nobody chose and which no reviewer would recognise as wrong. Placement is measured only where an annotation is linked to a field; unlinked markup still contributes its colour and font, just not its position.</p>
+<p>This exists so that a downstream agent is never asked to <em>calculate</em> placement or colour. Those are facts about finished work, recoverable by counting, and an LLM asked for them returns plausible coordinates that are subtly wrong — the one class of error a human reviewing a spreadsheet cannot catch.</p>
+<p><strong>Annotation text is stripped from the page text layer.</strong> PyMuPDF ≥1.24 renders annotation appearance streams into <code>page.get_text()</code>, so <code>BRTHDTC</code> appears both as an <code>Annotation</code> and as a <code>TextLine</code>. Any text object ≥60% inside an annotation rect is flagged <code>from_annotation</code>; Phase 3 reads <code>page.content_lines</code> so markup is never mistaken for a field label.</p>
+<p><strong>Coordinates.</strong> Absolute points are kept only for linking. Anything persisted to a template uses <code>BBox.relative(w, h)</code> (<code>rel_x_pct</code>, <code>rel_y_pct</code>) or a relative label (<code>right_of_field</code>), so templates survive layout changes.</p>
+<p><strong>Primary key is <code>(form_name, field_text)</code></strong>, never <code>field_text</code> alone — “Start Date” maps to <code>MHSTDTC</code>, <code>CMSTDTC</code> or <code>AESTDTC</code> depending on the form.</p>
+</section>
+<section id="tests" class="level2">
+<h2 class="anchored" data-anchor-id="tests">Tests</h2>
+<div class="sourceCode" id="cb8"><pre class="sourceCode bash code-with-copy"><code class="sourceCode bash"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="ex">.venv/bin/python</span> <span class="at">-m</span> pytest <span class="at">-q</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</section>
+</section>
+
+</main>
+<!-- /main column -->
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+        const codeEl = trigger.previousElementSibling.cloneNode(true);
+        for (const childEl of codeEl.children) {
+          if (isCodeAnnotation(childEl)) {
+            childEl.remove();
+          }
+        }
+        return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp('/' + window.location.host + '/');
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script>
+</div> <!-- /content -->
+
+
+
+
+</body></html>

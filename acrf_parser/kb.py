@@ -95,6 +95,8 @@ CREATE TABLE IF NOT EXISTS annotations (
     -- Rendered appearance, so house style can be derived from the database
     -- without re-parsing every PDF in the corpus.
     text_color    TEXT,
+    fill_color    TEXT,
+    fill_source   TEXT,
     font_name     TEXT,
     font_size     REAL,
     UNIQUE (document_id, annot_ref)
@@ -161,6 +163,12 @@ GROUP  BY field_key, form_name, field_text;
 """
 
 
+_ADDED_COLUMNS = [
+    ("annotations", "fill_color", "TEXT"),
+    ("annotations", "fill_source", "TEXT"),
+]
+
+
 def connect(db_path: str | Path) -> sqlite3.Connection:
     """Open (creating if needed) a knowledge base."""
     path = Path(db_path)
@@ -168,7 +176,22 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     con = sqlite3.connect(path)
     con.row_factory = sqlite3.Row
     con.executescript(SCHEMA)
+    _migrate(con)
     return con
+
+
+def _migrate(con: sqlite3.Connection) -> None:
+    """Add columns introduced after a database was first created.
+
+    `CREATE TABLE IF NOT EXISTS` silently leaves an older database on its old
+    shape, so an existing corpus would fail on insert rather than gain the new
+    column. Only additive changes belong here.
+    """
+    for table, column, decl in _ADDED_COLUMNS:
+        have = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
+        if column not in have:
+            con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    con.commit()
 
 
 def build_kb(doc: Document, db_path: str | Path, replace: bool = True) -> Path:
@@ -251,8 +274,9 @@ def _insert_annotations(con, doc: Document, doc_id: int, form_ids: dict[str, int
             cur = con.execute(
                 "INSERT INTO annotations (document_id, form_id, annot_ref, page, text,"
                 " annot_type, confidence, variable, domain, value, qnam, target_page,"
-                " parsed, evidence, bbox, relative, text_color, font_name, font_size)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " parsed, evidence, bbox, relative, text_color, fill_color,"
+                " fill_source, font_name, font_size)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (doc_id, form_ids.get(normalize(a.form_name)), a.id, a.page, a.text,
                  a.annot_type, a.type_confidence, p.get("variable"), p.get("domain"),
                  p.get("value"), p.get("qnam"), p.get("target_page"),
@@ -260,6 +284,8 @@ def _insert_annotations(con, doc: Document, doc_id: int, form_ids: dict[str, int
                  json.dumps(list(a.bbox.as_tuple())),
                  json.dumps(a.bbox.relative(page.width, page.height)),
                  json.dumps(list(a.text_color)) if a.text_color else None,
+                 json.dumps(list(a.fill_color)) if a.fill_color else None,
+                 a.fill_source or None,
                  a.font_name or None, a.font_size or None))
             ids[a.id] = int(cur.lastrowid)
     return ids

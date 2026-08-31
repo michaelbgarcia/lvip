@@ -1,6 +1,7 @@
 """Phase 10 tests: drawing annotations, and the loop closing on itself."""
 from pathlib import Path
 
+import pymupdf
 import pytest
 
 from acrf_parser import parse_pdf
@@ -149,6 +150,48 @@ def test_collisions_are_nudged_apart_and_reported(blank_doc, tmp_path):
     assert len(report.adjusted) == 2
     assert all("clear another annotation" in "; ".join(p.adjustments)
                for p in report.adjusted)
+
+
+def test_markup_is_not_printed_over_the_forms_own_text(blank_doc, tmp_path):
+    """The anchor the house style computes is frequently already occupied.
+
+    A field near the left margin puts "right of the label, 12pt across" straight
+    on top of the label beside it - which is the one thing markup must never do,
+    since the reader needs both.
+    """
+    row = _row("over", 180 / 842, rel_x=0.02)      # anchored onto the "Sex" label
+    report = write_annotations(blank_doc.path, [row], tmp_path / "clear.pdf")
+    rect = report.placements[0].rect
+
+    words = [w[:4] for w in pymupdf.open(blank_doc.path)[0].get_text("words")]
+    assert not [w for w in words
+                if min(rect.x1, w[2]) - max(rect.x0, w[0]) > 0.1
+                and min(rect.y1, w[3]) - max(rect.y0, w[1]) > 0.1]
+    assert any("clear the form text" in a for a in report.placements[0].adjustments)
+
+
+def test_the_same_statement_is_drawn_once_per_row(blank_doc, tmp_path):
+    """A question and its options pre-fill to one variable; the row states it once.
+
+    The two texts here are the same mapping written two ways, which is how it
+    actually arrives from a reviewer working row by row. The option sits a shade
+    higher than its question, as options do - the question still keeps the
+    markup, because on a row it is the leftmost field that owns it.
+    """
+    rows = [_row("question", 0.300, "SUPPDM.QVAL when QNAM=RACEOR", rel_x=0.15),
+            _row("option", 0.298, 'QVAL when SUPPDM.QNAM = "RACEOR"', rel_x=0.60)]
+    report = write_annotations(blank_doc.path, rows, tmp_path / "dup.pdf")
+    assert [p.row_id for p in report.placements] == ["question"]
+    assert dict(report.skipped)["option"] == (
+        "same statement as question, already placed on this row")
+
+
+def test_a_repeat_down_a_column_is_still_drawn(blank_doc, tmp_path):
+    """Only side-by-side repeats are one statement. A log form's rows are not."""
+    rows = [_row("r1", 0.30), _row("r2", 0.36), _row("r3", 0.42)]
+    report = write_annotations(blank_doc.path, rows, tmp_path / "log.pdf")
+    assert [p.row_id for p in report.placements] == ["r1", "r2", "r3"]
+    assert not report.skipped
 
 
 def test_an_unavailable_font_is_substituted_and_said_so(blank_doc, tmp_path):
