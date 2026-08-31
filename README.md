@@ -240,10 +240,18 @@ section's heading than to its own label. So an annotation must *share a row* wit
 a field (or sit within `ROW_SLACK_PT` of one) to be a candidate at all; candidates
 are then scored on independent features — row overlap, markup to the right,
 domain agreement, proximity, response zone — and consumed strongest-first rather
-than by argmax. An annotation links once; a field takes at most one annotation
-*per type*, because a field legitimately carries a `VARIABLE` and a
-`SUPP_QUALIFIER` at once but two bare variables on one label means one belongs to
-the field below. Page 1 of the fixture has two annotations with no field beside
+than by argmax. An annotation links once; a field takes up to `MAX_PER_TYPE`
+annotations of a type, and every one after the first has to genuinely *share the
+field's row*. The bound used to be one-per-type, on the reasoning that "two bare
+variables on one label means one belongs to the field below" — but a consent date
+annotated `DSTERM`, `DSDECOD=INFORMED CONSENT OBTAINED`, `RFICDTC` and `DSSTDTC`
+is four statements on one label, three of them plain variables, and a cap of one
+does not merely drop the extras: it teaches the corpus the field has one
+annotation, so the next study is pre-filled with a quarter of the markup it
+needs. What separates the two cases is the row, not the count — the neighbouring
+field's markup got in through `ROW_SLACK_PT` and has no vertical overlap at all,
+so the first annotation of a type may claim the slack and the rest may not. Page
+1 of the fixture has two annotations with no field beside
 them; both come back unlinked, which is the correct answer and the test that pins
 it. Losing candidates are kept with `rejected=True`, so a wrong link can be
 argued with instead of just re-run.
@@ -315,12 +323,25 @@ it sits just under the 0.6 floor. That margin is thin, and
 `test_opposites_stay_below_the_fuzzy_floor` exists to fail loudly if the floor
 is ever raised without re-checking it.
 
+**A row is one annotation, not one field.** CRF fields routinely carry several
+statements, so the workbook's key is `(row_id, annot_seq)` — which field, and
+which of its annotations. Pre-fill exports the whole set an exact key was seen
+with; a reviewer adds the rest by copying a row and giving it the next free seq,
+which is the one way the sheet lets rows be added. One statement per row is what
+lets each annotation keep its own type, colour and placement, what lets the
+importer name the one that is wrong, and what lets the writer draw them in the
+reviewer's own order. Only `EXACT_KEY` contributes a set: a fuzzy tier is a guess
+about which variable a label means, and multiplying a guess by four multiplies
+the reviewer's work without adding evidence.
+
 **The staging workbook is shaped by who reads it.** The agent gets one flat table
 with self-describing column names — no merged cells, no nesting. The human gets
 the match tier, score and source study *beside* the suggestion rather than in an
 audit log. The importer gets geometry, which is noise to the other two readers
 and must never be hand-edited, so it lives on a locked `Geometry` sheet keyed by
-`row_id`. Sheet protection is deliberately not switched on: it would stop Copilot
+`(row_id, annot_seq)` — and because that sheet is locked, a sibling row a
+reviewer added inherits its field's geometry rather than demanding they
+hand-write page fractions. Sheet protection is deliberately not switched on: it would stop Copilot
 writing at all. The locked flags record intent, and the importer is what enforces
 it — validation on the way back in, not a UI lock on the way out.
 
@@ -351,8 +372,12 @@ Three silent failures the importer exists to catch:
 
 - **A sorted or deleted row.** `row_id` is the only thing tying a spreadsheet row
   to a position on the PDF. Rows are matched by it and never by position, so
-  reversing the sheet changes nothing and a deleted row is an error rather than
-  an off-by-one annotation.
+  reversing the sheet changes nothing. A field may *lose* an annotation — that is
+  how one is removed — but a field with no rows left at all is an error, as is a
+  duplicated `(row_id, annot_seq)`, which is two rows nothing can tell apart. A
+  blank `annot_seq` on an added row is numbered automatically and flagged, since
+  "the next free one" has exactly one answer but choosing silently for the
+  reviewer does not.
 - **An edited label.** If `field_text` no longer matches the field its `row_id`
   points at, the row has stopped describing what it claims to.
 - **An unevaluated formula.** An agent that writes `=CONCAT(...)` into a file
@@ -429,6 +454,16 @@ every run. Two things it cannot decide alone:
   Rows are drawn top-to-bottom so a nudge always pushes into unclaimed space, the
   later one moves down, and it says so. Silently overprinted text is the failure
   a reviewer would only find by eye, on page 40.
+- **A field's own set.** Several annotations of one field share one box, so they
+  cannot each be anchored from the field or the first would take the spot and
+  collision search would scatter the rest — reading order lost, and the second
+  statement as likely to land two rows down as beside the first. Each is anchored
+  onto the end of the previous one in `annot_seq` order instead, so a set reads
+  left to right along the row it belongs to and spills onto a neighbouring row
+  only when this one genuinely runs out. Two annotations of the *same* field are
+  never de-duplicated against each other: they share a box, so the geometric test
+  cannot separate them, and a repeated statement is the importer's
+  `DUPLICATE_STATEMENT` warning for a person to settle.
 
 Only `ImportedRow.ready` rows are drawn — validated *and* signed off, never one
 without the other. A font the PDF cannot embed is substituted for a base-14 face

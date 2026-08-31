@@ -129,6 +129,9 @@ CREATE VIEW IF NOT EXISTS field_annotations AS
 SELECT d.file_name, fm.name AS form_name, fm.domain, f.field_key, f.page,
        f.text AS field_text, f.normalized_text,
        a.text AS annotation_text, a.annot_type, a.variable, a.value, a.qnam,
+       -- Where the annotation was drawn. Pre-fill orders a field's set by it, so
+       -- a set comes back in the order the last study actually read it in.
+       a.bbox AS annotation_bbox,
        l.link_score, l.trust, f.confidence AS field_confidence
 FROM   links l
 JOIN   fields f       ON f.id = l.field_id
@@ -168,6 +171,10 @@ _ADDED_COLUMNS = [
     ("annotations", "fill_source", "TEXT"),
 ]
 
+# Views are derived, so a changed one is re-created rather than migrated. Named
+# here so `_migrate` drops exactly the views `SCHEMA` re-creates.
+_VIEWS = ["field_annotations", "rejected_suggestions", "field_map"]
+
 
 def connect(db_path: str | Path) -> sqlite3.Connection:
     """Open (creating if needed) a knowledge base."""
@@ -186,11 +193,19 @@ def _migrate(con: sqlite3.Connection) -> None:
     `CREATE TABLE IF NOT EXISTS` silently leaves an older database on its old
     shape, so an existing corpus would fail on insert rather than gain the new
     column. Only additive changes belong here.
+
+    Views get the blunter treatment: `CREATE VIEW IF NOT EXISTS` would leave an
+    existing corpus reading through last version's view for good, so they are
+    dropped and re-created from `SCHEMA` every time. Nothing is stored in a view,
+    so this costs nothing and cannot lose data.
     """
     for table, column, decl in _ADDED_COLUMNS:
         have = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
         if column not in have:
             con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    for view in _VIEWS:
+        con.execute(f"DROP VIEW IF EXISTS {view}")
+    con.executescript(SCHEMA)
     con.commit()
 
 
@@ -381,6 +396,8 @@ class KnowledgeBase:
 
 # --- the return edge -------------------------------------------------------
 LEARNED_CONFIDENCE = 1.0     # a human said so; nothing scores higher
+SIBLING_GAP_PT = 6.0         # matches writer.SIBLING_GAP_PT: how two annotations
+                             # of one field are spaced when they are drawn
 
 
 def ingest_approved(report, blank_doc: Document, db_path: str | Path,
@@ -435,9 +452,14 @@ def _document_from_review(report, blank_doc: Document, source: str | None) -> Do
     by_id = {f.id: f for f in doc.iter_fields()}
     rows = [(r, HUMAN_APPROVED) for r in report.approved()]
     rows += [(r, HUMAN_REJECTED) for r in report.rejected()]
+    # Within a field, in the order they were drawn. A field's annotations are
+    # learned as the *set* it carries, and the offsets below only line up if they
+    # are laid down in the same order the writer laid them down on the page.
+    rows.sort(key=lambda rt: (rt[0].row_id, rt[0].annot_seq))
 
     for page in doc.pages:
         page.annotations = []
+    laid: dict[str, float] = {}          # field -> right edge of its last annotation
     for i, (row, trust) in enumerate(rows):
         fld = by_id.get(row.row_id)
         page = doc.page(fld.page) if fld else None
@@ -446,7 +468,9 @@ def _document_from_review(report, blank_doc: Document, source: str | None) -> Do
         _apply_form_name(doc, fld, row)
         text = (row.text_to_draw if trust == HUMAN_APPROVED
                 else row.suggested_annotation or row.suggested_variable)
-        annot = _annotation_from_row(row, fld, page, text, i)
+        annot = _annotation_from_row(row, fld, page, text, i, laid.get(row.row_id))
+        if trust == HUMAN_APPROVED:
+            laid[row.row_id] = annot.bbox.x1
         page.annotations.append(annot)
         doc.links.append(_link_from_row(row, fld, annot, trust))
     return doc
@@ -464,17 +488,23 @@ def _apply_form_name(doc: Document, fld, row) -> None:
                               evidence=["form named by the reviewer"]))
 
 
-def _annotation_from_row(row, fld, page, text: str, index: int):
+def _annotation_from_row(row, fld, page, text: str, index: int,
+                         after_x: float | None = None):
     """A synthetic Annotation standing for what the reviewer decided.
 
     Placed where the writer would draw it, so the geometry the next study learns
-    its house style from is the geometry that was actually used.
+    its house style from is the geometry that was actually used. `after_x` is the
+    right edge of this field's previous annotation: a field's second statement is
+    drawn beside its first, not on top of it, and stacking them all at the same x
+    would teach the next study an offset nobody used.
     """
     from .models import Annotation, BBox
     from .annotations import classify
     parsed = classify(text)
     w, h = page.width or 1.0, page.height or 1.0
     x0 = fld.bbox.x1 + (row.geometry.get("offset_x_pct") or 0.0) * w
+    if after_x is not None:
+        x0 = max(x0, after_x + SIBLING_GAP_PT)
     cy = fld.bbox.cy + (row.geometry.get("offset_y_pct") or 0.0) * h
     size = row.font_size or 8.0
     box = BBox(round(x0, 2), round(cy - size, 2),

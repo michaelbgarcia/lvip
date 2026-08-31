@@ -111,6 +111,43 @@ def test_a_field_may_hold_one_annotation_per_type():
     assert {l.field_id for l in links} == {"p1f0"}
 
 
+def test_a_field_may_hold_several_annotations_of_one_type():
+    """One consent date annotated four ways - the case a one-per-type cap lost.
+
+    All four sit on the label's own row, which is what makes them its own rather
+    than the next field's.
+    """
+    page = _page([("Date of informed consent", 100, 114)],
+                 [("DSTERM", 100, 114), ("RFICDTC", 100, 114),
+                  ("DSSTDTC", 101, 115)])
+    links = [l for l in linking.link_page(page) if not l.rejected]
+    assert {l.field_id for l in links} == {"p1f0"}
+    assert len(links) == 3
+
+
+def test_a_second_annotation_of_a_type_must_share_the_field_s_row():
+    """The protection the cap was really for: markup a hair off the row is the
+    neighbouring field's, and a field that already has one must not take it."""
+    page = _page([("Start Date", 100, 114)],
+                 [("AESTDTC", 100, 114), ("AEENDTC", 116, 130)])
+    links = linking.link_page(page)
+    accepted = [l for l in links if not l.rejected]
+    assert [doc_text(page, l) for l in accepted] == ["AESTDTC"]
+    refused = next(l for l in links if l.rejected)
+    assert "belongs to the neighbouring field" in refused.evidence[-1]
+
+
+def test_one_field_cannot_absorb_a_whole_page_of_one_type():
+    page = _page([("Start Date", 100, 114)],
+                 [(f"AETEST{i}", 100, 114) for i in range(linking.MAX_PER_TYPE + 2)])
+    accepted = [l for l in linking.link_page(page) if not l.rejected]
+    assert len(accepted) == linking.MAX_PER_TYPE
+
+
+def doc_text(page, link):
+    return next(a.text for a in page.annotations if a.id == link.annotation_id)
+
+
 def test_row_gate_rejects_markup_floating_between_rows():
     page = _page([("Start Date", 100, 114)], [("AESTDTC", 300, 314)])
     assert linking.link_page(page) == []

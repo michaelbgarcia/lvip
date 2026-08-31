@@ -25,6 +25,13 @@ result of one, and everything the search has to move is reported:
 * **Two annotations in the same place.** Fields on adjacent rows with tall
   markup collide. The later one is moved clear and says so. Silently overlapping
   text is the failure a reviewer would only find by eye, on page 40.
+* **A field's own annotations.** One field commonly carries several statements -
+  DSTERM, DSDECOD=INFORMED CONSENT OBTAINED, RFICDTC, DSSTDTC on a single consent
+  date. They arrive as separate rows sharing a `row_id`, and they are drawn in
+  `annot_seq` order, each starting from where the last one ended rather than from
+  the field again. So a set reads left to right along the row it belongs to, in
+  the order the reviewer put them in, and only spills onto a neighbouring row
+  when this one genuinely runs out of space.
 * **The same statement twice on one row.** A question and its response options
   are separate fields, and pre-fill maps them to the same variable - so "Sex" and
   its Male/Female options all arrive approved as SEX and the page ends up with
@@ -38,7 +45,6 @@ new path, so a bad run costs nothing.
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field as dc_field
 from pathlib import Path
 from typing import Any, Iterable
@@ -47,6 +53,7 @@ import pymupdf
 
 from .importer import ImportedRow
 from .models import BBox
+from .normalize import statement_key
 from .template import ABOVE, BELOW, LEFT_OF, OVERLAPS, RIGHT_OF
 
 # --- tunables --------------------------------------------------------------
@@ -59,10 +66,9 @@ ROW_OVERLAP_PT = 0.5        # vertical overlap that counts as "in the way"
 ROW_STEP_RATIO = 1.1        # vertical search step, as a multiple of box height
 MAX_ROW_STEPS = 4           # rows searched either side of the field's own row
 DUP_ROW_TOL = 12.0          # two fields this close vertically are one CRF row
+SIBLING_GAP_PT = 6.0        # gap between two annotations on the same field
 DEFAULT_SIZE = 8.0
 DEFAULT_AUTHOR = "acrf_parser"
-
-_TOKEN = re.compile(r"[A-Za-z0-9]+")
 
 # PyMuPDF only ships the base-14 fonts for annotation appearances. A study whose
 # house font is something else still gets a correct *box*; only the glyphs differ,
@@ -83,6 +89,16 @@ class Placement:
     text: str
     rect: BBox
     adjustments: list[str] = dc_field(default_factory=list)
+    annot_seq: int = 1
+
+    @property
+    def key(self) -> tuple[str, int]:
+        return (self.row_id, self.annot_seq)
+
+    @property
+    def label(self) -> str:
+        """How this annotation is named in the report."""
+        return self.row_id if self.annot_seq <= 1 else f"{self.row_id}#{self.annot_seq}"
 
 
 @dataclass
@@ -95,13 +111,22 @@ class WriteReport:
     def adjusted(self) -> list[Placement]:
         return [p for p in self.placements if p.adjustments]
 
+    @property
+    def multi_annotation_fields(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for p in self.placements:
+            counts[p.row_id] = counts.get(p.row_id, 0) + 1
+        return {k: v for k, v in sorted(counts.items()) if v > 1}
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "path": self.path,
             "written": len(self.placements),
+            "fields": len({p.row_id for p in self.placements}),
+            "multi_annotation_fields": len(self.multi_annotation_fields),
             "skipped": len(self.skipped),
             "adjusted": len(self.adjusted),
-            "adjustments": [f"{p.row_id}: {'; '.join(p.adjustments)}"
+            "adjustments": [f"{p.label}: {'; '.join(p.adjustments)}"
                             for p in self.adjusted],
             "skipped_rows": [f"{rid}: {why}" for rid, why in self.skipped],
         }
@@ -118,29 +143,33 @@ def write_annotations(source: str | Path, rows: Iterable[ImportedRow],
     # De-duplicated left-to-right, so the annotation a row keeps is the one on
     # its leftmost field - the question, not one of its response options, which
     # sit a few points higher and would otherwise win on y alone.
-    ready.sort(key=lambda r: (_page_of(r), _cx_of(r), _cy_of(r), r.row_id))
+    ready.sort(key=lambda r: (_page_of(r), _cx_of(r), _cy_of(r), r.row_id, r.annot_seq))
     ready, duplicates = _dedupe(ready)
     report.skipped += duplicates
     # Drawn top-to-bottom, so a move always pushes into space that has not been
-    # claimed yet and collision resolution stays deterministic.
-    ready.sort(key=lambda r: (_page_of(r), _cy_of(r), _cx_of(r), r.row_id))
+    # claimed yet and collision resolution stays deterministic. Within one field,
+    # annot_seq is the order - the reviewer's order, and the order the set will
+    # be read in.
+    ready.sort(key=lambda r: (_page_of(r), _cy_of(r), _cx_of(r), r.row_id, r.annot_seq))
 
     pdf = pymupdf.open(source)
     try:
         placed: dict[int, list[BBox]] = {}
         obstacles: dict[int, list[BBox]] = {}
+        siblings: dict[str, BBox] = {}     # field -> where its last annotation ended
         for row in ready:
             page_no = _page_of(row)
             if not 1 <= page_no <= pdf.page_count:
-                report.skipped.append((row.row_id, f"page {page_no} is not in {source.name}"))
+                report.skipped.append((_label(row), f"page {page_no} is not in {source.name}"))
                 continue
             page = pdf[page_no - 1]
             if page_no not in obstacles:
                 obstacles[page_no] = _obstacles(page)
             placement = _place(row, page, placed.setdefault(page_no, []),
-                               obstacles[page_no])
+                               obstacles[page_no], siblings.get(row.row_id))
             _draw(page, row, placement, author)
             placed[page_no].append(placement.rect)
+            siblings[row.row_id] = placement.rect
             report.placements.append(placement)
         pdf.save(out_path)
     finally:
@@ -155,10 +184,16 @@ def _partition(rows: Iterable[ImportedRow]) -> tuple[list[ImportedRow], list[tup
         if r.ready:
             ready.append(r)
         elif not r.ok:
-            skipped.append((r.row_id, "blocked by validation"))
+            skipped.append((_label(r), "blocked by validation"))
         else:
-            skipped.append((r.row_id, f"status is {r.status or 'blank'}, not APPROVED"))
+            skipped.append((_label(r), f"status is {r.status or 'blank'}, not APPROVED"))
     return ready, skipped
+
+
+def _label(row: ImportedRow) -> str:
+    """How one annotation is named in the report: bare row_id for a field with
+    one, `p5f3#2` for the second annotation of a field with several."""
+    return row.row_id if row.annot_seq <= 1 else f"{row.row_id}#{row.annot_seq}"
 
 
 def _page_of(row: ImportedRow) -> int:
@@ -182,36 +217,32 @@ def _dedupe(rows: list[ImportedRow]) -> tuple[list[ImportedRow], list[tuple[str,
     row is the unit: fields side by side, vertically level, saying the same
     thing. Nothing stacked is touched - a repeat down a column is a different
     field of a log form, and it needs its own markup.
+
+    Two annotations of the *same* field are never compared. They share a box, so
+    the geometric test cannot separate them, and they are there on purpose: the
+    reviewer asked for both. A field whose own rows repeat a statement is the
+    importer's DUPLICATE_STATEMENT warning, decided by a person, not silently
+    dropped here.
     """
     kept: list[ImportedRow] = []
     dropped: list[tuple[str, str]] = []
     seen: dict[tuple[int, tuple[str, ...]], list[tuple[str, BBox]]] = {}
     for row in rows:
-        key = _statement_key(row.text_to_draw)
+        key = statement_key(row.text_to_draw)
         box = _row_box(row)
         if not key or box is None:       # nothing to compare on; never guess
             kept.append(row)
             continue
         page_key = (_page_of(row), key)
-        prior = next((rid for rid, b in seen.get(page_key, []) if _same_row(box, b)), None)
+        prior = next((label for rid, label, b in seen.get(page_key, [])
+                      if rid != row.row_id and _same_row(box, b)), None)
         if prior:
-            dropped.append((row.row_id,
+            dropped.append((_label(row),
                             f"same statement as {prior}, already placed on this row"))
             continue
-        seen.setdefault(page_key, []).append((row.row_id, box))
+        seen.setdefault(page_key, []).append((row.row_id, _label(row), box))
         kept.append(row)
     return kept, dropped
-
-
-def _statement_key(text: str) -> tuple[str, ...]:
-    """What two annotations must share to be the same statement.
-
-    The word set, upper-cased. Annotators re-order and re-qualify the same
-    mapping without changing it - "SUPPDM.QVAL when QNAM=RACEOR" and "QVAL when
-    SUPPDM.QNAM = RACEOR" are one statement written twice, and comparing strings
-    would call them different.
-    """
-    return tuple(sorted({t.upper() for t in _TOKEN.findall(text or "")}))
 
 
 def _row_box(row: ImportedRow) -> BBox | None:
@@ -232,7 +263,7 @@ def _same_row(a: BBox, b: BBox) -> bool:
 
 # --- geometry --------------------------------------------------------------
 def _place(row: ImportedRow, page: pymupdf.Page, taken: list[BBox],
-           obstacles: list[BBox]) -> Placement:
+           obstacles: list[BBox], prior_sibling: BBox | None = None) -> Placement:
     """Turn page fractions back into points, then find clear space for the box."""
     g = row.geometry
     w = float(g.get("page_width") or page.rect.width)
@@ -245,11 +276,39 @@ def _place(row: ImportedRow, page: pymupdf.Page, taken: list[BBox],
     box_w, box_h = text_w + 2 * PAD_X, size * LINE_RATIO + 2 * PAD_Y
 
     anchor = _anchor(row, field, g, w, h, box_w, box_h)
+    if prior_sibling is not None:
+        anchor = _after_sibling(anchor, prior_sibling, row.placement, box_w, box_h)
     adjustments = ["font substituted for " + row.font_name] if substituted else []
     rect, moved = _fit(anchor, taken, obstacles, w, h, box_w)
     adjustments += moved
-    return Placement(row_id=row.row_id, page=_page_of(row), text=row.text_to_draw,
-                     rect=rect, adjustments=adjustments)
+    return Placement(row_id=row.row_id, annot_seq=row.annot_seq, page=_page_of(row),
+                     text=row.text_to_draw, rect=rect, adjustments=adjustments)
+
+
+def _after_sibling(anchor: BBox, prior: BBox, placement: str,
+                   box_w: float, box_h: float) -> BBox:
+    """Re-anchor an annotation onto the end of its field's previous one.
+
+    Without this every annotation of a field starts at the same point, the first
+    one takes it, and the rest are scattered by collision search into whatever
+    gaps happen to be free - reading order lost, and the second statement of a
+    field as likely to land two rows down as beside the first. Chaining instead
+    keeps the set together and in `annot_seq` order, and `_fit` still has the
+    last word if the chained position is occupied too.
+    """
+    if placement == LEFT_OF:
+        x0 = prior.x0 - SIBLING_GAP_PT - box_w
+        return BBox(x0, prior.y0, x0 + box_w, prior.y0 + box_h)
+    if placement in (ABOVE,):
+        y1 = prior.y0 - SIBLING_GAP_PT
+        return BBox(prior.x0, y1 - box_h, prior.x0 + box_w, y1)
+    if placement in (BELOW,):
+        y0 = prior.y1 + SIBLING_GAP_PT
+        return BBox(prior.x0, y0, prior.x0 + box_w, y0 + box_h)
+    # RIGHT_OF and OVERLAPS both read left to right, which is how aCRF markup is
+    # drawn and how a reviewer will read the set back.
+    x0 = prior.x1 + SIBLING_GAP_PT
+    return BBox(x0, prior.y0, x0 + box_w, prior.y0 + box_h)
 
 
 def _field_box(g: dict, w: float, h: float) -> BBox:

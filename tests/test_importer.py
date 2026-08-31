@@ -90,12 +90,13 @@ def test_unknown_row_id_is_caught(returned, blank_doc, tmp_path):
     assert "UNKNOWN_ROW_ID" in codes and "MISSING_ROW" in codes
 
 
-def test_duplicate_row_id_is_caught(returned, blank_doc, tmp_path):
+def test_duplicate_row_key_is_caught(returned, blank_doc, tmp_path):
+    """A repeated row_id is fine; a repeated (row_id, annot_seq) is not."""
     path, wb, ws, edit = returned
-    edit(3, row_id="p1f0")
+    edit(3, row_id="p1f0")                      # both rows now claim p1f0 seq 1
     out = tmp_path / "dupe.xlsx"
     wb.save(out)
-    assert "DUPLICATE_ROW_ID" in {i.code for i in _read(out, blank_doc).errors}
+    assert "DUPLICATE_ROW_KEY" in {i.code for i in _read(out, blank_doc).errors}
 
 
 def test_editing_the_label_out_from_under_its_row_id_is_caught(returned, blank_doc, tmp_path):
@@ -211,6 +212,134 @@ def test_uncalculated_formula_is_not_read_as_a_blank(returned, blank_doc, tmp_pa
     wb.save(out)
     row = next(r for r in _read(out, blank_doc).rows if r.row_id == "p1f0")
     assert "UNEVALUATED_FORMULA" in {i.code for i in row.issues} and not row.ok
+
+
+# --- several annotations on one field --------------------------------------
+def _add_sibling(ws, source_row, **cells):
+    """What a reviewer does in Excel: copy a row, paste it under, edit it."""
+    names = [c.value for c in ws[1]]
+    values = [ws.cell(row=source_row, column=j).value for j in range(1, len(names) + 1)]
+    ws.append(values)
+    for name, value in cells.items():
+        ws.cell(row=ws.max_row, column=names.index(name) + 1).value = value
+    return ws.max_row
+
+
+def test_an_added_sibling_row_is_accepted(returned, blank_doc, tmp_path):
+    """The whole point: a field that needs a second annotation gets a second row."""
+    path, wb, ws, _ = returned
+    _add_sibling(ws, 2, annot_seq=2, final_variable="RFICDTC",
+                 final_annotation="RFICDTC", status="APPROVED")
+    out = tmp_path / "sibling.xlsx"
+    wb.save(out)
+    report = _read(out, blank_doc)
+    assert not report.errors
+    rows = report.rows_for("p1f0")
+    assert [r.annot_seq for r in rows] == [1, 2]
+    assert [r.annotation_text for r in rows] == ["BRTHDTC", "RFICDTC"]
+    assert all(r.ready for r in rows)
+
+
+def test_a_sibling_inherits_its_field_s_geometry(returned, blank_doc, tmp_path):
+    """The Geometry sheet is locked and regenerated - a reviewer cannot add to it,
+    and does not need to: every row of a field describes the same box."""
+    path, wb, ws, _ = returned
+    _add_sibling(ws, 2, annot_seq=2, final_annotation="RFICDTC", status="APPROVED")
+    out = tmp_path / "inherit.xlsx"
+    wb.save(out)
+    first, second = _read(out, blank_doc).rows_for("p1f0")
+    assert second.geometry and second.geometry["rel_x_pct"] == first.geometry["rel_x_pct"]
+
+
+def test_a_blank_seq_is_numbered_and_said_out_loud(returned, blank_doc, tmp_path):
+    path, wb, ws, _ = returned
+    _add_sibling(ws, 2, annot_seq=None, final_annotation="RFICDTC", status="APPROVED")
+    out = tmp_path / "blankseq.xlsx"
+    wb.save(out)
+    report = _read(out, blank_doc)
+    second = report.rows_for("p1f0")[1]
+    assert second.annot_seq == 2 and second.ready
+    assert "IMPLIED_SEQ" in {i.code for i in second.issues}
+
+
+def test_two_rows_saying_the_same_thing_are_flagged(returned, blank_doc, tmp_path):
+    """Only one will ever be drawn; better said here than found by eye on page 40."""
+    path, wb, ws, _ = returned
+    _add_sibling(ws, 2, annot_seq=2)                 # an unedited copy: still BRTHDTC
+    out = tmp_path / "samestatement.xlsx"
+    wb.save(out)
+    report = _read(out, blank_doc)
+    second = report.rows_for("p1f0")[1]
+    issue = next(i for i in second.issues if i.code == "DUPLICATE_STATEMENT")
+    assert issue.severity == WARNING and "seq 1" in issue.message
+
+
+def test_a_field_may_lose_an_annotation_but_not_all_of_them(returned, blank_doc, tmp_path):
+    path, wb, ws, _ = returned
+    _add_sibling(ws, 2, annot_seq=2, final_annotation="RFICDTC", status="APPROVED")
+    ws.delete_rows(2)                                # seq 1 gone, seq 2 remains
+    out = tmp_path / "onegone.xlsx"
+    wb.save(out)
+    report = _read(out, blank_doc)
+    assert not any(i.code == "MISSING_ROW" and i.row_id == "p1f0"
+                   for i in report.issues)
+    assert [r.annot_seq for r in report.rows_for("p1f0")] == [2]
+
+
+def test_the_review_copy_lands_on_the_right_sibling(returned, blank_doc, tmp_path):
+    """Two rows share a row_id; a verdict written onto the wrong one is worse
+    than none at all."""
+    path, wb, ws, _ = returned
+    added = _add_sibling(ws, 2, annot_seq=2, final_annotation="RFICDTC",
+                         status="APPROVED", color_rgb="crimson")
+    out = tmp_path / "twoverdicts.xlsx"
+    wb.save(out)
+    report = _read(out, blank_doc)
+    copy = write_review_copy(report, out, tmp_path / "verdicts.xlsx")
+
+    ws2 = load_workbook(copy)[st.SHEET_WORK]
+    names = [c.value for c in ws2[1]]
+    col = names.index("import_issues") + 1
+    assert not ws2.cell(row=2, column=col).value          # seq 1 was fine
+    assert "crimson" in ws2.cell(row=added, column=col).value
+
+
+def test_the_report_counts_annotations_and_fields_separately(returned, blank_doc, tmp_path):
+    path, wb, ws, _ = returned
+    _add_sibling(ws, 2, annot_seq=2, final_annotation="RFICDTC", status="APPROVED")
+    out = tmp_path / "counts.xlsx"
+    wb.save(out)
+    d = _read(out, blank_doc).to_dict()
+    assert d["rows"] == 15 and d["fields"] == 14
+    assert d["multi_annotation_fields"] == 1 and d["approved"] == 10
+
+
+def test_a_workbook_without_the_seq_column_still_imports(returned, blank_doc, tmp_path):
+    """A sheet exported before annot_seq existed is a one-annotation-per-field
+    sheet, which is exactly what it now reads as."""
+    path, wb, ws, _ = returned
+    for sheet in (st.SHEET_WORK, st.SHEET_GEOM):
+        names = [c.value for c in wb[sheet][1]]
+        wb[sheet].delete_cols(names.index("annot_seq") + 1)
+    out = tmp_path / "legacy.xlsx"
+    wb.save(out)
+    report = _read(out, blank_doc)
+    assert not report.errors
+    assert len(report.rows) == 14 and {r.annot_seq for r in report.rows} == {1}
+    assert all(r.geometry for r in report.rows)
+
+
+def test_several_added_rows_with_no_seq_are_numbered_in_order(returned, blank_doc,
+                                                              tmp_path):
+    path, wb, ws, _ = returned
+    for text in ("RFICDTC", "DSSTDTC"):
+        _add_sibling(ws, 2, annot_seq=None, final_variable=text,
+                     final_annotation=text, status="APPROVED")
+    out = tmp_path / "unnumbered.xlsx"
+    wb.save(out)
+    rows = _read(out, blank_doc).rows_for("p1f0")
+    assert [r.annot_seq for r in rows] == [1, 2, 3]
+    assert [r.annotation_text for r in rows] == ["BRTHDTC", "RFICDTC", "DSSTDTC"]
 
 
 # --- reporting -------------------------------------------------------------

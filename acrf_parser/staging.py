@@ -19,6 +19,15 @@ Design follows from who reads it:
 
 Only `EXACT_KEY` rows arrive as AUTO. Everything else is NEEDS_REVIEW or
 NEEDS_MAPPING regardless of score, so no fuzzy match can slip through unlooked-at.
+
+The unit of a row is one **annotation**, not one field. A CRF field routinely
+carries several statements - "Date of informed consent" is DSTERM, DSDECOD=
+INFORMED CONSENT OBTAINED, RFICDTC and DSSTDTC - so the key is (`row_id`,
+`annot_seq`): the field it belongs to, and which of that field's annotations it
+is. History exports the whole set it has seen; a reviewer adds the rest by
+copying a row and giving it the next free seq. One statement per row is what
+lets each annotation keep its own type, colour and placement, and what lets the
+importer name the one that is wrong.
 """
 from __future__ import annotations
 
@@ -52,12 +61,17 @@ ANNOT_TYPES = ["VARIABLE", "CONSTANT_ASSIGNMENT", "SUPP_QUALIFIER", "NOT_SUBMITT
 # is the only one who can see that and fix it, and since the primary key is
 # (form_name, field_text), an uncorrectable form name would file the pair under
 # the wrong form forever.
-EDITABLE = ("form_name", "final_variable", "final_annotation", "final_annot_type",
-            "status", "reviewer_note", "color_rgb", "font_name", "font_size",
-            "placement")
+#
+# `annot_seq` is editable for the same reason: it is how a reviewer says "this
+# field needs a second annotation". They copy the row, change the seq, and write
+# the second statement - no other column tells the importer that is what they
+# meant.
+EDITABLE = ("annot_seq", "form_name", "final_variable", "final_annotation",
+            "final_annot_type", "status", "reviewer_note", "color_rgb", "font_name",
+            "font_size", "placement")
 
 HEADERS = [
-    ("row_id", 10), ("form_name", 22), ("page", 6), ("field_text", 42),
+    ("row_id", 10), ("annot_seq", 10), ("form_name", 22), ("page", 6), ("field_text", 42),
     ("item_number", 11), ("options", 26), ("control", 9),
     ("suggested_variable", 18), ("suggested_annotation", 26), ("suggested_annot_type", 20),
     ("match_tier", 22), ("match_score", 11), ("match_source", 38), ("match_reason", 52),
@@ -78,15 +92,25 @@ STATUS_FILL = {"AUTO": FILL_AUTO, "NEEDS_REVIEW": FILL_REVIEW,
 
 @dataclass
 class StagingRow:
-    """One field of the blank CRF, as it appears in the workbook."""
+    """One annotation of one field of the blank CRF, as it appears in the workbook."""
     row_id: str
     values: dict[str, Any]
     geometry: dict[str, Any]
+    annot_seq: int = 1
+
+    @property
+    def key(self) -> tuple[str, int]:
+        """What identifies this row in the workbook, and on the way back in."""
+        return (self.row_id, self.annot_seq)
 
 
 def build_staging(doc: Document, index: PrefillIndex | None = None,
                   house: HouseStyle | None = None) -> list[StagingRow]:
     """Pre-fill a parsed blank CRF into staging rows.
+
+    One row per annotation history proposes, and always at least one per field:
+    a field history has nothing for still gets its NEEDS_MAPPING row, because a
+    field with no row is a field nobody is asked about.
 
     With no index the sheet is still produced - every row simply arrives as
     NEEDS_MAPPING, which is the honest state of a first study with no history.
@@ -99,18 +123,22 @@ def build_staging(doc: Document, index: PrefillIndex | None = None,
     for page in doc.pages:
         for fld in page.fields:
             r = results.get(fld.id)
-            rows.append(_row(doc, page, fld, r, house))
+            candidates = r.annotations if r else [None]
+            for seq, candidate in enumerate(candidates, start=1):
+                rows.append(_row(doc, page, fld, r, candidate, seq, house))
     return rows
 
 
-def _row(doc, page, fld, result, house: HouseStyle) -> StagingRow:
-    best = result.best if result else None
-    status = result.status if result else pf.NEEDS_MAPPING_STATUS
+def _row(doc, page, fld, result, best, seq: int, house: HouseStyle) -> StagingRow:
+    status = (result.status_of(best) if result and best
+              else pf.NEEDS_MAPPING_STATUS)
     rule = house.for_type(best.annot_type if best and best.annot_type else "VARIABLE")
     return StagingRow(
         row_id=fld.id,
+        annot_seq=seq,
         values={
             "row_id": fld.id,
+            "annot_seq": seq,
             "form_name": fld.form_name,
             "page": fld.page,
             "field_text": fld.text,
@@ -138,7 +166,7 @@ def _row(doc, page, fld, result, house: HouseStyle) -> StagingRow:
             "placement": rule.placement,
         },
         geometry={
-            "row_id": fld.id, "page": fld.page,
+            "row_id": fld.id, "annot_seq": seq, "page": fld.page,
             "page_width": page.width, "page_height": page.height,
             **fld.bbox.relative(page.width, page.height),
             "offset_x_pct": rule.offset_x_pct, "offset_y_pct": rule.offset_y_pct,
@@ -220,11 +248,17 @@ def _validate(ws, names: list[str], column: str, options: list[str], n_rows: int
 
 
 def _geometry_sheet(wb: Workbook, rows: list[StagingRow]) -> None:
-    """Locked, keyed by row_id. The importer's input, not the human's."""
+    """Locked, keyed by (row_id, annot_seq). The importer's input, not the human's.
+
+    A sibling row a reviewer adds has no geometry row of its own - they cannot
+    write to this sheet, and should not have to. The importer inherits the
+    field's geometry from seq 1 instead; every row of one field describes the
+    same box on the page, so there is nothing to lose in doing so.
+    """
     ws = wb.create_sheet(SHEET_GEOM)
-    keys = ["row_id", "page", "page_width", "page_height", "rel_x_pct", "rel_y_pct",
-            "rel_w_pct", "rel_h_pct", "offset_x_pct", "offset_y_pct", "group_id",
-            "field_confidence"]
+    keys = ["row_id", "annot_seq", "page", "page_width", "page_height",
+            "rel_x_pct", "rel_y_pct", "rel_w_pct", "rel_h_pct",
+            "offset_x_pct", "offset_y_pct", "group_id", "field_confidence"]
     ws.append(keys)
     for cell in ws[1]:
         cell.font = Font(bold=True, color="FFFFFF")
@@ -291,14 +325,17 @@ def _readme_sheet(wb: Workbook, doc: Document, rows: list[StagingRow]) -> None:
     counts: dict[str, int] = {}
     for r in rows:
         counts[r.values["status"]] = counts.get(r.values["status"], 0) + 1
+    fields = len({r.row_id for r in rows})
     lines = [
         ("aCRF staging workbook", True),
         (f"Source: {Path(doc.path).name} · {doc.page_count} pages · "
-         f"{len(doc.forms)} forms · {len(rows)} fields", False),
+         f"{len(doc.forms)} forms · {fields} fields · {len(rows)} annotation rows", False),
         (f"Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}", False),
         ("", False),
         ("How to use this workbook", True),
-        ("1. Work the 'Annotations' sheet. One row per CRF field.", False),
+        ("1. Work the 'Annotations' sheet. One row per ANNOTATION, not per field:", False),
+        ("   a field with four annotations has four rows, sharing one row_id and", False),
+        ("   numbered 1, 2, 3, 4 in annot_seq.", False),
         ("2. Rows are pre-filled from previously annotated studies where the", False),
         ("   (form_name, field_text) pair was seen before. Those arrive as AUTO", False),
         ("   with final_variable already set - confirm, do not retype.", False),
@@ -312,11 +349,26 @@ def _readme_sheet(wb: Workbook, doc: Document, rows: list[StagingRow]) -> None:
         ("   files the answer where nobody will find it again.", False),
         ("6. Set status to APPROVED or REJECTED on every row before importing.", False),
         ("", False),
+        ("Adding a second annotation to a field", True),
+        ("- Copy the whole row, paste it directly beneath, and put the next free", False),
+        ("  number in annot_seq (leave annot_seq blank and it will be numbered for", False),
+        ("  you, with a warning). Keep row_id exactly as it is - that is what says", False),
+        ("  which field the annotation belongs to.", False),
+        ("- Write one statement per row. 'DSTERM' and 'RFICDTC' are two rows, not", False),
+        ("  one cell holding both: each gets its own type, colour and placement,", False),
+        ("  and they are drawn side by side in annot_seq order.", False),
+        ("- Delete a surplus row rather than blanking it, but never delete every", False),
+        ("  row of a field - each field needs at least one.", False),
+        ("", False),
         ("Rules", True),
         ("- Only fill the unshaded columns. Shaded columns are evidence and are", False),
         ("  regenerated on every export; edits to them are ignored on import.", False),
-        ("- Do not add, delete, sort or reorder rows. row_id is the key that ties", False),
-        ("  each row to its position on the PDF; a lost row_id cannot be placed.", False),
+        ("- Do not sort or reorder rows, and do not invent a row_id. row_id is the", False),
+        ("  key that ties each row to its position on the PDF; a row_id that is not", False),
+        ("  in this CRF cannot be placed. Adding rows is allowed only as described", False),
+        ("  above: a copy of an existing row, with a new annot_seq.", False),
+        ("- (row_id, annot_seq) must be unique. Two rows with the same pair is an", False),
+        ("  error, because neither can be told from the other on the way back in.", False),
         ("- Formatting columns are pre-filled from the house style measured across", False),
         ("  previous studies. Change them only for a deliberate exception.", False),
         ("- See the 'HouseStyle' sheet for rules marked settled=NO. Those are cases", False),
@@ -341,6 +393,11 @@ def summarize_staging(rows: list[StagingRow]) -> dict[str, Any]:
         tiers[r.values["match_tier"]] = tiers.get(r.values["match_tier"], 0) + 1
         statuses[r.values["status"]] = statuses.get(r.values["status"], 0) + 1
     total = len(rows) or 1
-    return {"rows": len(rows), "by_tier": dict(sorted(tiers.items())),
+    per_field: dict[str, int] = {}
+    for r in rows:
+        per_field[r.row_id] = per_field.get(r.row_id, 0) + 1
+    return {"rows": len(rows), "fields": len(per_field),
+            "by_tier": dict(sorted(tiers.items())),
             "by_status": dict(sorted(statuses.items())),
-            "auto_fill_rate": round(statuses.get("AUTO", 0) / total, 3)}
+            "auto_fill_rate": round(statuses.get("AUTO", 0) / total, 3),
+            "multi_annotation_fields": sum(1 for n in per_field.values() if n > 1)}

@@ -25,6 +25,22 @@ Two failures are worth calling out because they are silent otherwise:
 * **An unevaluated formula.** If the agent writes `=CONCAT(...)` and the file is
   never opened in Excel, the cached value is empty and the cell silently reads
   as blank. That is detected and reported rather than imported as "no decision".
+
+Several rows per field
+----------------------
+A row is one annotation, and a field may have several - so the key is
+(`row_id`, `annot_seq`) and *added rows are legitimate*. That is the one place
+this module deliberately trusts the sheet: a row whose `row_id` names a real
+field is accepted however it got there, because copying a row and bumping the
+seq is exactly how a reviewer says "this field needs a second annotation".
+
+What is still guarded is everything that could make an added row ambiguous. A
+duplicated (row_id, seq) is an error - two rows nothing can tell apart. A blank
+seq is numbered automatically and flagged, because "next free" is unambiguous
+but silently choosing for the reviewer is not. A `row_id` that is not a field of
+this CRF is still an error. And a field with *no* rows left is still an error:
+deleting a row is how an annotation is removed, deleting all of them is how a
+field goes unannotated by accident.
 """
 from __future__ import annotations
 
@@ -37,7 +53,7 @@ from openpyxl import load_workbook
 
 from . import annotations as ann
 from .models import Document
-from .normalize import normalize
+from .normalize import normalize, statement_key
 from .staging import ANNOT_TYPES, SHEET_FORMS, SHEET_GEOM, SHEET_WORK, STATUSES
 from .template import ABOVE, BELOW, LEFT_OF, OVERLAPS, RIGHT_OF
 
@@ -66,8 +82,9 @@ class Issue:
 
 @dataclass
 class ImportedRow:
-    """One reviewed field, ready for the PDF writer if it passed."""
+    """One reviewed annotation, ready for the PDF writer if it passed."""
     row_id: str
+    annot_seq: int = 1
     form_name: str = ""
     field_text: str = ""
     status: str = ""
@@ -87,6 +104,11 @@ class ImportedRow:
     geometry: dict[str, Any] = dc_field(default_factory=dict)
     reviewer_note: str = ""
     issues: list[Issue] = dc_field(default_factory=list)
+
+    @property
+    def key(self) -> tuple[str, int]:
+        """Identity in the workbook: which field, and which of its annotations."""
+        return (self.row_id, self.annot_seq)
 
     @property
     def ok(self) -> bool:
@@ -138,10 +160,24 @@ class ImportReport:
     def blocked(self) -> list[ImportedRow]:
         return [r for r in self.rows if not r.ok]
 
+    def rows_for(self, row_id: str) -> list[ImportedRow]:
+        """Every annotation on one field, in seq order."""
+        return sorted((r for r in self.rows if r.row_id == row_id),
+                      key=lambda r: r.annot_seq)
+
+    def multi_annotation_fields(self) -> dict[str, int]:
+        """field -> how many annotations it carries, for fields carrying several."""
+        counts: dict[str, int] = {}
+        for r in self.rows:
+            counts[r.row_id] = counts.get(r.row_id, 0) + 1
+        return {k: v for k, v in sorted(counts.items()) if v > 1}
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "path": self.path,
             "rows": len(self.rows),
+            "fields": len({r.row_id for r in self.rows}),
+            "multi_annotation_fields": len(self.multi_annotation_fields()),
             "approved": len(self.approved()),
             "blocked": len(self.blocked()),
             "errors": len(self.errors),
@@ -172,7 +208,8 @@ def read_staging(path: str | Path, doc: Document | None = None) -> ImportReport:
     ws, fws = values[SHEET_WORK], formulas[SHEET_WORK]
     names = [c.value for c in ws[1]]
 
-    seen: set[str] = set()
+    seen: set[tuple[str, int]] = set()
+    used_seqs: dict[str, set[int]] = {}
     fields = {f.id: f for f in doc.iter_fields()} if doc else {}
     # Field carries its form's *name*; the domain lives on the Form - and for a
     # blank CRF it is only knowable from history, which the exporter recorded on
@@ -182,22 +219,48 @@ def read_staging(path: str | Path, doc: Document | None = None) -> ImportReport:
     for i, row in enumerate(ws.iter_rows(min_row=2), start=2):
         raw = {n: c.value for n, c in zip(names, row)}
         raw_f = {n: c.value for n, c in zip(names, fws[i])}
-        imported = _row(raw, raw_f, geometry, fields, domains, seen)
+        imported = _row(raw, raw_f, geometry, fields, domains, seen, used_seqs)
         if imported:
             report.rows.append(imported)
 
+    _check_sets(report)
     if doc:
-        for missing in sorted(set(fields) - seen):
+        for missing in sorted(set(fields) - {rid for rid, _ in seen}):
             report.issues.append(Issue(
                 missing, "row_id", ERROR, "MISSING_ROW",
-                f"field {missing} ({fields[missing].text!r}) has no row - "
-                "rows must not be deleted"))
+                f"field {missing} ({fields[missing].text!r}) has no row at all - "
+                "a field may lose annotations, but not every one of them"))
     return report
+
+
+def _check_sets(report: ImportReport) -> None:
+    """Cross-row checks within one field's set of annotations.
+
+    The one thing a per-row check cannot see: two rows on the same field saying
+    the same thing. It reads as thoroughness in the sheet and prints the same
+    markup twice on the page, so it is caught here rather than by eye on page 40.
+    """
+    for row_id in sorted({r.row_id for r in report.rows}):
+        rows = report.rows_for(row_id)
+        if len(rows) < 2:
+            continue
+        seen: dict[tuple[str, ...], int] = {}
+        for r in rows:
+            key = statement_key(r.text_to_draw)
+            if not key:
+                continue
+            if key in seen:
+                r.issues.append(Issue(
+                    r.row_id, "final_annotation", WARNING, "DUPLICATE_STATEMENT",
+                    f"annot_seq {r.annot_seq} says the same thing as seq "
+                    f"{seen[key]}; only one of them will be drawn"))
+            else:
+                seen[key] = r.annot_seq
 
 
 # --- one row ---------------------------------------------------------------
 def _row(raw: dict, formulas: dict, geometry: dict, fields: dict, domains: dict,
-         seen: set[str]) -> ImportedRow | None:
+         seen: set[tuple[str, int]], used_seqs: dict[str, set[int]]) -> ImportedRow | None:
     row_id = _text(raw.get("row_id"))
     if not row_id:
         return None                       # a blank trailing row is not an error
@@ -210,6 +273,7 @@ def _row(raw: dict, formulas: dict, geometry: dict, fields: dict, domains: dict,
                     reviewer_note=_text(raw.get("reviewer_note")))
     add = lambda col, sev, code, msg: r.issues.append(Issue(row_id, col, sev, code, msg))
 
+    _check_seq(r, raw, used_seqs, add)
     _check_identity(r, raw, fields, seen, add)
     _check_formulas(r, raw, formulas, add)
     _check_status(r, raw, add)
@@ -219,20 +283,62 @@ def _row(raw: dict, formulas: dict, geometry: dict, fields: dict, domains: dict,
     return r
 
 
-def _check_identity(r, raw, fields, seen, add) -> None:
-    """row_id is the only link to a position on the PDF. Guard it hard."""
-    if r.row_id in seen:
-        add("row_id", ERROR, "DUPLICATE_ROW_ID",
-            f"{r.row_id} appears more than once")
+def _check_seq(r, raw, used_seqs: dict[str, set[int]], add) -> None:
+    """Which annotation of its field this row is.
+
+    Blank is the common case for a row a reviewer added: they copied a row and
+    wrote the new statement, which is the part that needed a person. Numbering it
+    for them is safe - "the next free one" has exactly one answer - but it is
+    still said out loud, because a blank seq is as easily a row they forgot to
+    finish as one they meant to leave to us.
+    """
+    taken = used_seqs.setdefault(r.row_id, set())
+    raw_seq = raw.get("annot_seq")
+    if raw_seq in (None, ""):
+        r.annot_seq = next(n for n in range(1, len(taken) + 2) if n not in taken)
+        if taken:
+            add("annot_seq", WARNING, "IMPLIED_SEQ",
+                f"blank annot_seq on a field that already has {len(taken)} "
+                f"annotation(s); numbered {r.annot_seq}")
+        taken.add(r.annot_seq)
         return
-    seen.add(r.row_id)
+    try:
+        seq = int(float(raw_seq))
+    except (TypeError, ValueError):
+        add("annot_seq", ERROR, "BAD_ANNOT_SEQ",
+            f"{raw_seq!r} is not a whole number")
+        return
+    if seq < 1:
+        add("annot_seq", ERROR, "BAD_ANNOT_SEQ",
+            f"annot_seq {seq} is not a positive number")
+        return
+    r.annot_seq = seq
+    taken.add(seq)
+
+
+def _check_identity(r, raw, fields, seen, add) -> None:
+    """row_id is the only link to a position on the PDF. Guard it hard.
+
+    Rows may be *added* - that is how a field gets a second annotation - so what
+    is guarded is not the row count but the key: (row_id, annot_seq) identifies
+    one annotation, and two rows claiming it is unresolvable.
+    """
+    if any(i.code == "BAD_ANNOT_SEQ" for i in r.issues):
+        return                            # its key is unknown; do not invent one
+    if r.key in seen:
+        add("annot_seq", ERROR, "DUPLICATE_ROW_KEY",
+            f"{r.row_id} annot_seq {r.annot_seq} appears more than once - give "
+            "each annotation of a field its own seq")
+        return
+    seen.add(r.key)
     if not fields:
         return
     fld = fields.get(r.row_id)
     if fld is None:
         add("row_id", ERROR, "UNKNOWN_ROW_ID",
-            f"{r.row_id} is not a field in this CRF - was the row added, or the "
-            "workbook built from a different PDF?")
+            f"{r.row_id} is not a field in this CRF - a row added for a second "
+            "annotation must keep the row_id it was copied from, and the workbook "
+            "must be the one built from this PDF")
     elif normalize(r.field_text) != normalize(fld.text):
         add("field_text", ERROR, "ROW_ALTERED",
             f"field_text {r.field_text!r} no longer matches {fld.text!r}; the row "
@@ -364,7 +470,14 @@ def _check_formatting(r, raw, add) -> None:
 
 
 def _check_geometry(r, geometry, add) -> None:
-    geom = geometry.get(r.row_id)
+    """Find this row's geometry, inheriting it from the field where it must.
+
+    A sibling row a reviewer added has no `Geometry` row - that sheet is locked
+    and regenerated, and asking them to hand-write page fractions would be worse
+    than useless. Every row of one field describes the same box, so the field's
+    own geometry is the right answer; only the seq the reviewer chose is new.
+    """
+    geom = geometry.get(r.key) or _inherited_geometry(geometry, r.row_id)
     if geom is None:
         add("row_id", ERROR, "MISSING_GEOMETRY",
             f"no {SHEET_GEOM} row for {r.row_id} - nowhere to place the annotation")
@@ -379,6 +492,12 @@ def _check_geometry(r, geometry, add) -> None:
                 f"{SHEET_GEOM}.{key} = {value} is not a page fraction")
             return
     r.geometry = geom
+
+
+def _inherited_geometry(geometry: dict, row_id: str) -> dict | None:
+    """The lowest-seq geometry recorded for this field."""
+    candidates = [(seq, g) for (rid, seq), g in geometry.items() if rid == row_id]
+    return min(candidates, key=lambda c: c[0])[1] if candidates else None
 
 
 def _read_domains(wb) -> dict[str, str]:
@@ -397,7 +516,12 @@ def _read_domains(wb) -> dict[str, str]:
     return out
 
 
-def _read_geometry(wb, report: ImportReport) -> dict[str, dict]:
+def _read_geometry(wb, report: ImportReport) -> dict[tuple[str, int], dict]:
+    """Keyed by (row_id, annot_seq).
+
+    A workbook written before `annot_seq` existed has no such column; its rows
+    are read as seq 1, which is what they were.
+    """
     if SHEET_GEOM not in wb.sheetnames:
         report.issues.append(Issue("", SHEET_GEOM, ERROR, "MISSING_SHEET",
                                    f"workbook has no {SHEET_GEOM!r} sheet"))
@@ -408,8 +532,15 @@ def _read_geometry(wb, report: ImportReport) -> dict[str, dict]:
     for row in ws.iter_rows(min_row=2, values_only=True):
         g = dict(zip(names, row))
         if g.get("row_id"):
-            out[str(g["row_id"])] = g
+            out[(str(g["row_id"]), _seq(g.get("annot_seq")))] = g
     return out
+
+
+def _seq(value, default: int = 1) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
 
 
 # --- helpers ---------------------------------------------------------------
@@ -441,12 +572,20 @@ def write_review_copy(report: ImportReport, source: str | Path,
     ws.cell(row=1, column=col).fill = PatternFill("solid", fgColor="263238")
     ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = 60
 
-    by_row = {r.row_id: r for r in report.rows}
+    # Paired by position, not by key. `report.rows` was built by walking these
+    # same rows in this same order, so the n-th non-blank row is the n-th report
+    # row - and that stays true for a row whose seq was blank and got numbered on
+    # the way in, which a key lookup could not find its way back to. The row_id
+    # is checked anyway, so a mismatch degrades to "no verdict" rather than to
+    # somebody else's verdict.
     id_col = names.index("row_id") + 1
+    pending = list(report.rows)
     for i in range(2, ws.max_row + 1):
         row_id = _text(ws.cell(row=i, column=id_col).value)
-        r = by_row.get(row_id)
-        if not r or not r.issues:
+        if not row_id:
+            continue
+        r = pending.pop(0) if pending else None
+        if not r or r.row_id != row_id or not r.issues:
             continue
         ws.cell(row=i, column=col, value="; ".join(
             f"[{x.severity}] {x.column}: {x.message}" for x in r.issues))

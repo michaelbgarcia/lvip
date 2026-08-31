@@ -18,3 +18,19 @@ def clean(text: str) -> str:
 def normalize(text: str) -> str:
     """Full normalization: lowercase, drop punctuation, collapse whitespace."""
     return _WS.sub(" ", _PUNCT.sub(" ", clean(text).lower())).strip()
+
+
+_TOKEN = re.compile(r"[A-Za-z0-9]+")
+
+
+def statement_key(text: str) -> tuple[str, ...]:
+    """Identity of an annotation *statement*: its word set, upper-cased.
+
+    Annotators re-order and re-qualify the same mapping without changing what it
+    says - "SUPPDM.QVAL when QNAM=RACEOR" and "QVAL when SUPPDM.QNAM = RACEOR"
+    are one statement written twice, and comparing strings would call them two.
+    Used wherever the question is "have we already got this one?": collecting the
+    annotation set for a field, catching a sibling row that repeats another, and
+    de-duplicating what gets drawn on the page.
+    """
+    return tuple(sorted({t.upper() for t in _TOKEN.findall(text or "")}))

@@ -103,13 +103,25 @@ font / placement conventions) from the corpus too.
 |---|---|---|
 | `output/blank_acrf.extract.json` | 1–6 | this blank CRF's own parse |
 | `output/blank_acrf.template.json` | 8 | (unless `--no-template`) |
-| `output/blank_acrf.staging.xlsx` | 9a/9b | **the workbook a reviewer/agent works in** — one row per field, pre-filled where history reaches, `NEEDS_MAPPING` where it doesn't |
+| `output/blank_acrf.staging.xlsx` | 9a/9b | **the workbook a reviewer/agent works in** — one row per *annotation*, pre-filled where history reaches, `NEEDS_MAPPING` where it doesn't |
 
 Open the staging XLSX: rows are pre-filled with a tier (`EXACT_KEY`,
 `CROSS_FORM_CONSENSUS`, `DOMAIN_PATTERN`, `FUZZY_SAME_FORM`, or
 `NEEDS_MAPPING`) plus the score/source study for anything fuzzy. Only
 `EXACT_KEY` rows arrive pre-approved; everything else needs a human or agent
 decision. Geometry lives on a separate, locked `Geometry` sheet — don't hand-edit it.
+
+**One row is one annotation.** A field with several annotations has several rows,
+sharing a `row_id` and numbered 1, 2, 3… in `annot_seq`. Where history has seen a
+field carry a set — `DSTERM`, `DSDECOD=INFORMED CONSENT OBTAINED`, `RFICDTC`,
+`DSSTDTC` on one consent date — the whole set is exported. To add one yourself,
+copy the row, paste it directly beneath, and put the next free number in
+`annot_seq` (leave it blank and the importer numbers it, with a warning). Keep
+`row_id` exactly as it is — that is what says which field the annotation belongs
+to. Write one statement per row rather than several in one cell: each row keeps
+its own type, colour and placement, and they are drawn side by side in
+`annot_seq` order. `(row_id, annot_seq)` must be unique, and a field must keep at
+least one row.
 
 With no `--corpus`, the workbook still gets written — every row just comes
 back `NEEDS_MAPPING`, which is the honest state of a first study.

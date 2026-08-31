@@ -4,7 +4,8 @@ from openpyxl import load_workbook
 
 from acrf_parser import prefill as pf
 from acrf_parser import staging as st
-from acrf_parser.prefill import PrefillIndex
+from acrf_parser.normalize import normalize, statement_key
+from acrf_parser.prefill import Candidate, PrefillIndex
 
 
 @pytest.fixture(scope="session")
@@ -21,15 +22,44 @@ def work(book):
     return ws, names, [dict(zip(names, r)) for r in ws.iter_rows(min_row=2, values_only=True)]
 
 
+@pytest.fixture(scope="session")
+def multi_index(corpus, blank_doc):
+    """History in which "Date of birth" carried two annotations, not one."""
+    fld = next(f for f in blank_doc.iter_fields() if f.text == "Date of birth")
+    idx = PrefillIndex.from_documents(corpus)
+    key = (normalize(fld.form_name), fld.normalized_text)
+    idx.key_sets[key][statement_key("RFICDTC")] = Candidate(
+        tier=pf.EXACT_KEY, confidence=pf.CONF_EXACT, variable="RFICDTC",
+        annotation_text="RFICDTC", annot_type="VARIABLE",
+        source="prior.pdf · Demographics · Date of birth",
+        evidence=["(form, field_text) seen in prior.pdf"])
+    return idx
+
+
+@pytest.fixture(scope="session")
+def multi_book(blank_doc, multi_index, house, tmp_path_factory):
+    path = st.write_staging(blank_doc, tmp_path_factory.mktemp("xlm") / "multi.xlsx",
+                            index=multi_index, house=house)
+    return load_workbook(path)
+
+
+def _rows(book, sheet=st.SHEET_WORK):
+    ws = book[sheet]
+    names = [c.value for c in ws[1]]
+    return [dict(zip(names, r)) for r in ws.iter_rows(min_row=2, values_only=True)]
+
+
 def test_sheets(book):
     assert book.sheetnames == [st.SHEET_WORK, st.SHEET_GEOM, st.SHEET_STYLE,
                                st.SHEET_FORMS, st.SHEET_README]
 
 
 def test_one_row_per_field(work, blank_doc):
+    """This corpus has one annotation per field, so rows and fields coincide."""
     _, _, rows = work
     assert len(rows) == len(list(blank_doc.iter_fields())) == 14
     assert [r["row_id"] for r in rows] == [f.id for f in blank_doc.iter_fields()]
+    assert {r["annot_seq"] for r in rows} == {1}
 
 
 def test_auto_rows_arrive_decided(work):
@@ -121,10 +151,49 @@ def test_forms_sheet_lists_the_parse(book, blank_doc):
     assert rows == [f.name for f in blank_doc.forms]
 
 
+# --- several annotations on one field --------------------------------------
+def test_a_field_history_saw_twice_gets_two_rows(multi_book):
+    rows = [r for r in _rows(multi_book) if r["row_id"] == "p1f0"]
+    assert [r["annot_seq"] for r in rows] == [1, 2]
+    assert {r["suggested_annotation"] for r in rows} == {"BRTHDTC", "RFICDTC"}
+    assert all(r["status"] == "AUTO" for r in rows)
+
+
+def test_every_other_field_still_gets_exactly_one_row(multi_book, blank_doc):
+    counts: dict[str, int] = {}
+    for r in _rows(multi_book):
+        counts[r["row_id"]] = counts.get(r["row_id"], 0) + 1
+    assert counts.pop("p1f0") == 2
+    assert set(counts.values()) == {1}
+    assert len(counts) == len(list(blank_doc.iter_fields())) - 1
+
+
+def test_both_rows_describe_the_same_box(multi_book):
+    """Siblings share their field's geometry - only the seq distinguishes them."""
+    geom = [g for g in _rows(multi_book, st.SHEET_GEOM) if g["row_id"] == "p1f0"]
+    assert [g["annot_seq"] for g in geom] == [1, 2]
+    box = lambda g: (g["rel_x_pct"], g["rel_y_pct"], g["rel_w_pct"], g["rel_h_pct"])
+    assert box(geom[0]) == box(geom[1])
+
+
+def test_the_summary_counts_rows_and_fields_separately(blank_doc, multi_index, house):
+    rows = st.build_staging(blank_doc, index=multi_index, house=house)
+    s = st.summarize_staging(rows)
+    assert s["rows"] == 15 and s["fields"] == 14
+    assert s["multi_annotation_fields"] == 1
+
+
 def test_instructions_state_the_row_id_rule(book):
     text = "\n".join(str(r[0]) for r in book[st.SHEET_README].iter_rows(values_only=True))
-    assert "row_id" in text and "Do not add, delete, sort or reorder rows" in text
+    assert "row_id" in text and "Do not sort or reorder rows" in text
     assert "NEEDS_MAPPING" in text
+
+
+def test_instructions_explain_how_to_add_a_second_annotation(book):
+    """The one thing a reviewer cannot work out from the columns alone."""
+    text = "\n".join(str(r[0]) for r in book[st.SHEET_README].iter_rows(values_only=True))
+    assert "Adding a second annotation to a field" in text
+    assert "annot_seq" in text and "Keep row_id exactly as it is" in text
 
 
 # --- no history yet --------------------------------------------------------

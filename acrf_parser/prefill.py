@@ -28,17 +28,32 @@ to SEX on every form that has one, so text alone is sufficient. "Start Date" map
 to MHSTDTC, AESTDTC and CMSTDTC, so text alone is *insufficient* - and the
 algorithm learns that from the disagreement rather than being told. Where the
 corpus disagrees, no cross-form suggestion is offered and the reason is recorded.
+
+One field, several annotations
+------------------------------
+A CRF field routinely carries more than one statement. "Date of informed
+consent" is annotated DSTERM, DSDECOD=INFORMED CONSENT OBTAINED, RFICDTC *and*
+DSSTDTC - four statements about one label, and none of them is the "best" one.
+So an exact key returns the whole **set** it was seen with, not a single winner:
+`Prefill.best` is the first of them and `Prefill.companions` the rest, and the
+staging workbook exports one row per member.
+
+Only EXACT_KEY contributes companions. A fuzzy tier is a guess about *which*
+variable a label means, and multiplying a guess by four multiplies the reviewer's
+work by four for no extra evidence - so every fuzzy tier still proposes at most
+one thing.
 """
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field as dc_field
+from dataclasses import dataclass, field as dc_field, replace
 from difflib import SequenceMatcher
 from typing import Any, Iterable
 
 from .models import GEOMETRIC, HUMAN_APPROVED, TRUST_RANK, Document, Field
-from .normalize import normalize
+from .normalize import normalize, statement_key
 
 # --- tiers -----------------------------------------------------------------
 EXACT_KEY = "EXACT_KEY"
@@ -55,6 +70,11 @@ REVIEW_THRESHOLD = 0.5     # below this the row goes to the agent unfilled
 FUZZY_FLOOR = 0.6          # similarity below this is not a candidate at all
 MIN_CONSENSUS_FORMS = 2    # distinct forms that must agree for a cross-form hit
 MIN_PATTERN_DOMAINS = 2    # distinct domains that must attest a role suffix
+# A ceiling on how many statements one exact key may propose. Real fields reach
+# four or five; a key that reaches twenty is a corpus problem (one label reused
+# across studies for different things), and shipping twenty rows for one label
+# would bury the reviewer rather than help them.
+MAX_ANNOTATIONS_PER_FIELD = 8
 
 AUTO, NEEDS_REVIEW, NEEDS_MAPPING_STATUS = "AUTO", "NEEDS_REVIEW", "NEEDS_MAPPING"
 
@@ -72,24 +92,47 @@ class Candidate:
     source: str = ""                 # "STUDY-XYZ · Medical History · Start Date"
     trust: str = GEOMETRIC
     evidence: list[str] = dc_field(default_factory=list)
+    # Where this annotation was drawn on the page it came from, as its left edge.
+    # A field's set is ordered by it, so the set comes back in the order the last
+    # study read it in - which, since annotations are drawn left to right in the
+    # reviewer's own order, is the reviewer's order. 0.0 when unknown.
+    drawn_x: float = 0.0
 
 
 @dataclass
 class Prefill:
-    """The pre-fill verdict for one field of the blank CRF."""
+    """The pre-fill verdict for one field of the blank CRF.
+
+    `best` and `companions` together are the annotation *set* history proposes -
+    one workbook row each. `alternates` is a different thing: rival answers to
+    the same question, kept as evidence and never exported as rows.
+    """
     field_id: str
     form_name: str
     field_text: str
     best: Candidate
     alternates: list[Candidate] = dc_field(default_factory=list)
     aliases: list[str] = dc_field(default_factory=list)   # other labels for this variable
+    # Further statements this same field carried in history: a second row each,
+    # not competitors of `best`.
+    companions: list[Candidate] = dc_field(default_factory=list)
 
     @property
     def status(self) -> str:
         """Only an exact hit ships unreviewed; everything fuzzy is a suggestion."""
-        if self.best.tier == EXACT_KEY and self.best.confidence >= AUTO_THRESHOLD:
+        return self.status_of(self.best)
+
+    def status_of(self, candidate: Candidate) -> str:
+        """Per-candidate, because each one becomes its own row to sign off."""
+        if candidate.tier == EXACT_KEY and candidate.confidence >= AUTO_THRESHOLD:
             return AUTO
-        return NEEDS_REVIEW if self.best.confidence >= REVIEW_THRESHOLD else NEEDS_MAPPING_STATUS
+        return (NEEDS_REVIEW if candidate.confidence >= REVIEW_THRESHOLD
+                else NEEDS_MAPPING_STATUS)
+
+    @property
+    def annotations(self) -> list[Candidate]:
+        """Every candidate that earns a row, in the order they are exported."""
+        return [self.best, *self.companions]
 
 
 class PrefillIndex:
@@ -97,6 +140,9 @@ class PrefillIndex:
 
     def __init__(self) -> None:
         self.by_key: dict[tuple[str, str], Candidate] = {}
+        # Every *distinct statement* the key was seen with, best evidence per
+        # statement. `by_key` is the head of this; the tail is the companions.
+        self.key_sets: dict[tuple[str, str], dict[str, Candidate]] = defaultdict(dict)
         self.by_text: dict[str, list[dict]] = defaultdict(list)
         self.by_form: dict[str, list[dict]] = defaultdict(list)
         self.suffixes: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
@@ -118,7 +164,7 @@ class PrefillIndex:
         rows = kb.con.execute(
             "SELECT file_name, form_name, domain, field_key, field_text,"
             " normalized_text, annotation_text, annot_type, variable, link_score,"
-            " trust FROM field_annotations").fetchall()
+            " trust, annotation_bbox FROM field_annotations").fetchall()
         idx = cls._build(dict(r) for r in rows)
         idx._seed_rejections(kb.con.execute(
             "SELECT field_key, annotation_text FROM rejected_suggestions"))
@@ -151,6 +197,7 @@ class PrefillIndex:
                     "field_text": fld.text, "normalized_text": fld.normalized_text,
                     "annotation_text": a.text, "annot_type": a.annot_type,
                     "variable": (a.parsed or {}).get("variable") or "",
+                    "annotation_bbox": list(a.bbox.as_tuple()),
                     "link_score": link.link_score,
                 })
         idx = cls._build(rows)
@@ -170,14 +217,19 @@ class PrefillIndex:
             # to a lucky geometric match, however well that match scored.
             trust = r.get("trust") or GEOMETRIC
             key = (form_key, r["normalized_text"])
-            prior = idx.by_key.get(key)
+            # Kept per *statement*, not per key: a field that carried DSTERM and
+            # RFICDTC has two answers, and collapsing them to one loses half the
+            # markup the last reviewer approved.
+            statement = statement_key(r["annotation_text"])
+            prior = idx.key_sets[key].get(statement)
             if prior is None or _outranks(trust, r["link_score"], prior):
                 approved = trust == HUMAN_APPROVED
-                idx.by_key[key] = Candidate(
+                idx.key_sets[key][statement] = Candidate(
                     tier=EXACT_KEY,
                     confidence=CONF_APPROVED if approved else CONF_EXACT,
                     variable=r["variable"] or "", annotation_text=r["annotation_text"],
                     annot_type=r["annot_type"], trust=trust,
+                    drawn_x=_left_edge(r.get("annotation_bbox")),
                     source=f"{r['file_name']} · {r['form_name']} · {r['field_text']}",
                     evidence=[f"approved by a reviewer on {r['file_name']}" if approved
                               else f"(form, field_text) seen in {r['file_name']}"])
@@ -186,7 +238,25 @@ class PrefillIndex:
             if r["variable"]:
                 idx.variable_labels[(form_key, r["variable"])].add(r["field_text"])
                 idx._learn_suffix(r)
+        idx._settle_key_sets()
         return idx
+
+    def _settle_key_sets(self) -> None:
+        """Order each key's statements and publish the head as `by_key`.
+
+        Ordering is deliberate and stable: a reviewer's approval first, then the
+        stronger evidence, then where the annotation was drawn - so a set comes
+        back in the reading order it had on the page it came from rather than in
+        alphabetical order, which no reviewer chose. The text breaks the last tie,
+        so two equal statements never swap places between runs and make a
+        workbook diff meaningless.
+        """
+        for key, statements in self.key_sets.items():
+            ranked = sorted(statements.values(),
+                            key=lambda c: (-TRUST_RANK.get(c.trust, 1), -c.confidence,
+                                           c.drawn_x, c.annotation_text))
+            self.key_sets[key] = {statement_key(c.annotation_text): c for c in ranked}
+            self.by_key[key] = ranked[0]
 
     def _seed_rejections(self, pairs) -> None:
         for key, annotation in pairs:
@@ -222,14 +292,33 @@ class PrefillIndex:
             self._domain_pattern(text_key, domain),
             self._fuzzy(form_key, text_key),
         ) if c]
-        found = self._drop_rejected(f"{form_key}|{text_key}", found)
+        field_key = f"{form_key}|{text_key}"
+        found = self._drop_rejected(field_key, found)
         found.sort(key=lambda c: -c.confidence)
         best = found[0] if found else Candidate(
             tier=NEEDS_MAPPING, confidence=0.0,
             evidence=["no field in the corpus reaches this label"])
+        companions = (self._companions(form_key, text_key, field_key, best)
+                      if best.tier == EXACT_KEY else [])
         return Prefill(field_id=fld.id, form_name=fld.form_name, field_text=fld.text,
-                       best=best, alternates=found[1:],
+                       best=best, alternates=found[1:], companions=companions,
                        aliases=self._aliases(form_key, best.variable, fld.text))
+
+    def _companions(self, form_key: str, text_key: str, field_key: str,
+                    best: Candidate) -> list[Candidate]:
+        """The rest of the statements this exact key was seen carrying.
+
+        Each becomes its own workbook row, so each is filtered against the
+        rejection list on its own - a reviewer who struck DSSTDTC off this field
+        last study must not get it back because DSTERM happened to survive.
+        """
+        rest = [_fresh(c) for k, c in self.key_sets.get((form_key, text_key), {}).items()
+                if k != statement_key(best.annotation_text)]
+        kept = [c for c in self._drop_rejected(field_key, rest) if c.confidence > 0]
+        for c in kept:
+            c.evidence.append("carried alongside "
+                              f"{best.annotation_text!r} on the same field")
+        return kept[:MAX_ANNOTATIONS_PER_FIELD - 1]
 
     def _drop_rejected(self, field_key: str, found: list[Candidate]) -> list[Candidate]:
         """Never re-propose what a reviewer already turned down for this field."""
@@ -247,7 +336,7 @@ class PrefillIndex:
         return counts.most_common(1)[0][0] if counts else ""
 
     def _exact(self, form_key: str, text_key: str) -> Candidate | None:
-        return self.by_key.get((form_key, text_key))
+        return _fresh(self.by_key.get((form_key, text_key)))
 
     def _consensus(self, form_key: str, text_key: str) -> Candidate | None:
         """This label under *other* forms. Only offered when they all agree.
@@ -328,6 +417,32 @@ class PrefillIndex:
                       if normalize(l) != normalize(current))
 
 
+def _left_edge(bbox: Any) -> float:
+    """x0 out of a stored bbox, whatever shape it arrives in. 0.0 when unknown."""
+    if isinstance(bbox, str):
+        try:
+            bbox = json.loads(bbox)
+        except ValueError:
+            return 0.0
+    try:
+        return float(bbox[0])
+    except (TypeError, ValueError, IndexError, KeyError):
+        return 0.0
+
+
+def _fresh(candidate: Candidate | None) -> Candidate | None:
+    """A per-field copy of an indexed candidate.
+
+    `_drop_rejected` edits the candidate it is handed - it zeroes the score and
+    says why. Handing out the stored object would make that edit permanent for
+    every later field that looks the same key up, so the index only ever lends
+    copies.
+    """
+    if candidate is None:
+        return None
+    return replace(candidate, evidence=list(candidate.evidence))
+
+
 def _outranks(trust: str, score: float, prior: Candidate) -> bool:
     """Higher trust always wins; within the same trust, the better link wins."""
     mine, theirs = TRUST_RANK.get(trust, 1), TRUST_RANK.get(prior.trust, 1)
@@ -393,10 +508,14 @@ def summarize_prefill(results: list[Prefill]) -> dict[str, Any]:
         tiers[r.best.tier] = tiers.get(r.best.tier, 0) + 1
         statuses[r.status] = statuses.get(r.status, 0) + 1
     total = len(results) or 1
+    multi = [r for r in results if r.companions]
     return {
         "fields": len(results),
         "by_tier": dict(sorted(tiers.items())),
         "by_status": dict(sorted(statuses.items())),
         "auto_fill_rate": round(statuses.get(AUTO, 0) / total, 3),
         "reaches_agent": statuses.get(NEEDS_MAPPING_STATUS, 0),
+        # Rows, not fields: what the workbook will actually be this many of.
+        "annotations": sum(len(r.annotations) for r in results),
+        "multi_annotation_fields": len(multi),
     }

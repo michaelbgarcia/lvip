@@ -120,6 +120,93 @@ def test_aliases_give_the_reviewer_context(index):
     assert r.aliases == ["Start Date"]
 
 
+# --- several annotations on one field --------------------------------------
+def _consent_corpus(*annotations, file_name="prior.pdf", **kw):
+    """One field, seen in history carrying each of `annotations`."""
+    return PrefillIndex._build([
+        {"file_name": file_name, "form_name": "Informed Consent", "domain": "DS",
+         "field_key": "informed consent|date of informed consent",
+         "field_text": "Date of informed consent",
+         "normalized_text": "date of informed consent",
+         "annotation_text": text, "annot_type": "VARIABLE",
+         "variable": text.split("=")[0], "link_score": 0.9, **kw}
+        for text in annotations])
+
+
+def test_an_exact_key_proposes_every_annotation_it_was_seen_with():
+    """The real shape of a consent date: four statements, none of them the one."""
+    idx = _consent_corpus("DSTERM", "DSDECOD=INFORMED CONSENT OBTAINED",
+                          "RFICDTC", "DSSTDTC")
+    r = idx.match(_field("Informed Consent", "Date of informed consent"), domain="DS")
+    assert r.best.tier == pf.EXACT_KEY
+    assert len(r.annotations) == 4
+    assert {c.annotation_text for c in r.annotations} == {
+        "DSTERM", "DSDECOD=INFORMED CONSENT OBTAINED", "RFICDTC", "DSSTDTC"}
+    assert all(r.status_of(c) == pf.AUTO for c in r.annotations)
+
+
+def test_a_companion_says_why_it_is_there():
+    idx = _consent_corpus("DSTERM", "RFICDTC")
+    r = idx.match(_field("Informed Consent", "Date of informed consent"), domain="DS")
+    assert r.companions
+    assert any("carried alongside" in e for e in r.companions[0].evidence)
+
+
+def test_the_same_statement_written_two_ways_is_one_annotation():
+    """Re-ordering a qualifier does not make a second statement."""
+    idx = _consent_corpus('SUPPDS.QVAL when QNAM = "PROTVER"',
+                          'QVAL when SUPPDS.QNAM = "PROTVER"')
+    r = idx.match(_field("Informed Consent", "Date of informed consent"), domain="DS")
+    assert len(r.annotations) == 1
+
+
+def test_a_rejected_companion_is_not_proposed_again():
+    """Each annotation of a set is filtered on its own - striking one off must
+    not take the others with it, and must not come back because they survived."""
+    idx = _consent_corpus("DSTERM", "RFICDTC", "DSSTDTC")
+    idx._seed_rejections([("informed consent|date of informed consent", "RFICDTC")])
+    r = idx.match(_field("Informed Consent", "Date of informed consent"), domain="DS")
+    assert [c.annotation_text for c in r.annotations] == ["DSSTDTC", "DSTERM"]
+
+
+def test_a_field_with_one_annotation_has_no_companions(index):
+    r = index.match(_field("Medical History", "Start Date"), domain="MH")
+    assert r.companions == [] and len(r.annotations) == 1
+
+
+def test_only_exact_keys_bring_a_set(index):
+    """A fuzzy tier is a guess about which variable a label means; multiplying a
+    guess by four multiplies the reviewer's work, not the evidence."""
+    r = index.match(_field("Medical History", "Start Date of Condition"), domain="MH")
+    assert r.best.tier == pf.FUZZY_SAME_FORM and r.companions == []
+
+
+def test_a_set_keeps_the_order_it_was_drawn_in():
+    """Alphabetical is an order nobody chose. Annotations are drawn left to right
+    in the reviewer's own sequence, so their x is that sequence, recoverable."""
+    idx = PrefillIndex._build([
+        {"file_name": "prior.pdf", "form_name": "Informed Consent", "domain": "DS",
+         "field_key": "informed consent|date of informed consent",
+         "field_text": "Date of informed consent",
+         "normalized_text": "date of informed consent",
+         "annotation_text": text, "annot_type": "VARIABLE", "variable": text,
+         "annotation_bbox": [x, 100.0, x + 40, 114.0], "link_score": 0.9}
+        for text, x in [("DSSTDTC", 480.0), ("DSTERM", 340.0), ("RFICDTC", 410.0)]])
+    r = idx.match(_field("Informed Consent", "Date of informed consent"), domain="DS")
+    assert [c.annotation_text for c in r.annotations] == ["DSTERM", "RFICDTC", "DSSTDTC"]
+
+
+def test_the_index_lends_copies_not_its_own_candidates():
+    """`_drop_rejected` edits what it is handed; if that were the stored object,
+    one rejected field would zero the key for every later field like it."""
+    idx = _consent_corpus("DSTERM")
+    idx._seed_rejections([("informed consent|date of informed consent", "DSTERM")])
+    idx.match(_field("Informed Consent", "Date of informed consent"), domain="DS")
+    stored = idx.by_key[("informed consent", "date of informed consent")]
+    assert stored.confidence == pf.CONF_EXACT
+    assert not any("rejected" in e for e in stored.evidence)
+
+
 def test_an_empty_corpus_is_honest(doc):
     """A first study with no history: every row is the agent's, and says so."""
     empty = PrefillIndex()

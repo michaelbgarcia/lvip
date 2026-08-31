@@ -1,4 +1,6 @@
 """The return edge: approved work flowing back into the knowledge base."""
+import json
+
 import pytest
 from openpyxl import load_workbook
 
@@ -160,6 +162,76 @@ def test_a_rejected_suggestion_is_not_offered_again(blank_doc, corpus_db, review
 
 def test_rejected_rows_are_never_written_to_the_pdf(reviewed):
     assert all(r.row_id != "p2f2" for r in reviewed.approved())
+
+
+# --- a set, all the way round ----------------------------------------------
+@pytest.fixture
+def reviewed_with_a_set(blank_doc, corpus_db, tmp_path):
+    """The same sheet, with a reviewer adding three more annotations to one field.
+
+    "Date of birth" arrives pre-filled with BRTHDTC alone; the reviewer says it
+    also carries RFICDTC and DSSTDTC, the way a real consent date does.
+    """
+    with KnowledgeBase(corpus_db) as kb:
+        st.write_staging(blank_doc, tmp_path / "set.xlsx",
+                         index=PrefillIndex.from_kb(kb),
+                         house=derive_house_style_from_kb(kb))
+    wb = load_workbook(tmp_path / "set.xlsx")
+    ws = wb[st.SHEET_WORK]
+    names = [c.value for c in ws[1]]
+    col = lambda n: names.index(n) + 1
+    for i in range(2, ws.max_row + 1):
+        if ws.cell(row=i, column=col("status")).value == "AUTO":
+            ws.cell(row=i, column=col("status")).value = "APPROVED"
+
+    source = next(i for i in range(2, ws.max_row + 1)
+                  if ws.cell(row=i, column=col("row_id")).value == "p1f0")
+    for seq, text in enumerate(["RFICDTC", "DSSTDTC"], start=2):
+        ws.append([ws.cell(row=source, column=j).value for j in range(1, len(names) + 1)])
+        for name, value in (("annot_seq", seq), ("final_variable", text),
+                            ("final_annotation", text), ("status", "APPROVED")):
+            ws.cell(row=ws.max_row, column=col(name)).value = value
+    out = tmp_path / "reviewed_set.xlsx"
+    wb.save(out)
+    return read_staging(out, blank_doc)
+
+
+def test_an_added_set_survives_the_whole_round_trip(blank_doc, corpus_db,
+                                                    reviewed_with_a_set, tmp_path):
+    """Reviewer adds two annotations -> drawn on the PDF -> learned -> proposed
+    back as a set on the next study. Every stage has to carry all three or the
+    loop quietly loses the reviewer's work."""
+    from acrf_parser.writer import write_annotations
+
+    report = write_annotations(blank_doc.path, reviewed_with_a_set.rows,
+                               tmp_path / "set.pdf")
+    drawn = {p.text for p in report.placements if p.row_id == "p1f0"}
+    assert drawn == {"BRTHDTC", "RFICDTC", "DSSTDTC"}
+
+    ingest_approved(reviewed_with_a_set, blank_doc, corpus_db, source="STUDY-SET")
+    with KnowledgeBase(corpus_db) as kb:
+        index = PrefillIndex.from_kb(kb)
+    again = {r.field_id: r for r in prefill_document(blank_doc, index)}["p1f0"]
+    # In the reviewer's own order, not alphabetically: the set is ranked by where
+    # it was drawn, and it was drawn left to right in annot_seq order.
+    assert [c.annotation_text for c in again.annotations] == [
+        "BRTHDTC", "RFICDTC", "DSSTDTC"]
+    assert all(again.status_of(c) == "AUTO" for c in again.annotations)
+
+
+def test_the_learned_set_is_not_stacked_at_one_point(blank_doc, corpus_db,
+                                                     reviewed_with_a_set):
+    """Geometry is stored where the writer would draw it. Filing three
+    annotations at the same x would teach the next study an offset nobody used."""
+    ingest_approved(reviewed_with_a_set, blank_doc, corpus_db, source="STUDY-SET")
+    with KnowledgeBase(corpus_db) as kb:
+        boxes = [json.loads(r[0]) for r in kb.con.execute(
+            "SELECT a.bbox FROM annotations a JOIN documents d ON a.document_id = d.id"
+            " WHERE d.file_name = 'STUDY-SET' AND a.text IN"
+            " ('BRTHDTC', 'RFICDTC', 'DSSTDTC')")]
+    xs = sorted(b[0] for b in boxes)
+    assert len(xs) == 3 and len(set(xs)) == 3
+    assert all(b < a for a, b in zip(xs[1:], xs)), "laid out left to right"
 
 
 def test_house_style_learns_from_the_approved_geometry(blank_doc, corpus_db, reviewed):

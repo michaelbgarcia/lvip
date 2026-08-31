@@ -17,12 +17,30 @@ So linking is row-aware and scored, not nearest:
   of the label, domain agreement, proximity, response zone), each of which
   lands in the link's evidence.
 * assignment, not argmax: candidates are consumed strongest-first, an
-  annotation links once, and a field takes at most one annotation *per type* -
-  a field legitimately carries a VARIABLE and a SUPP_QUALIFIER at once, but two
-  bare variables on one label means one of them belongs to the field below.
+  annotation links once, and a field takes a bounded number of annotations per
+  type.
 
 Losing candidates are kept with `rejected=True` so a wrong link can be argued
 with rather than just re-run.
+
+On the per-type bound
+---------------------
+This was one-per-type, on the reasoning that "two bare variables on one label
+means one of them belongs to the field below". Half of that is right and half is
+not. A CRF field routinely carries several statements of the same kind - a
+consent date annotated DSTERM, DSDECOD=INFORMED CONSENT OBTAINED, RFICDTC *and*
+DSSTDTC is four, three of them plain variables - and a hard cap of one does not
+merely lose the extras, it teaches the corpus that the field has one annotation,
+so the next study is pre-filled with a quarter of the markup it needs.
+
+What actually separates the two cases is the row, not the count. A second
+annotation belonging to this field sits *on* the field's row and overlaps it
+vertically; the one that belongs to the field below got in through
+`ROW_SLACK_PT`, the courtesy that lets markup drawn slightly off its row still
+be a candidate, and has no overlap at all. So the rule is: the first annotation
+of a type may claim the slack, and every further one must genuinely share the
+row - up to `MAX_PER_TYPE`, which is a guard against a pathological page rather
+than a statement about CRFs.
 
 DOMAIN_HEADER and CROSS_REFERENCE markup is never linked to a field - it
 describes the form, and Phase 2 has already consumed it.
@@ -42,6 +60,7 @@ W_ZONE = 0.10        # annotation parked over the response column
 PROX_SCALE_PT = 40.0     # ~3 lines: beyond this, vertical distance says nothing
 ROW_SLACK_PT = 6.0       # markup drawn just off its row still counts as on it
 MIN_LINK_SCORE = 0.35
+MAX_PER_TYPE = 4         # annotations of one type one field may take (see above)
 
 # Markup that describes the form rather than any one field.
 FORM_LEVEL = frozenset({ann.DOMAIN_HEADER, ann.CROSS_REFERENCE})
@@ -62,20 +81,39 @@ def link_page(page: Page, doc: Document | None = None) -> list[Link]:
 
     links: list[Link] = []
     linked: set[str] = set()
-    taken: dict[tuple[str, str], str] = {}
-    for annot, fld, score, evidence in scored:
+    taken: dict[tuple[str, str], list[str]] = {}
+    for annot, fld, score, evidence, row in scored:
         slot = (fld.id, annot.annot_type)
+        held = taken.get(slot, [])
         reason = ("annotation already linked to a better field" if annot.id in linked
-                  else f"field already has a {annot.annot_type} link" if slot in taken
-                  else "")
+                  else _slot_refusal(annot, held, row))
         links.append(Link(field_id=fld.id, annotation_id=annot.id, page=page.number,
                           link_score=round(score, 3),
                           evidence=evidence + ([reason] if reason else []),
                           rejected=bool(reason)))
         if not reason:
             linked.add(annot.id)
-            taken[slot] = annot.id
+            taken.setdefault(slot, []).append(annot.id)
     return links
+
+
+def _slot_refusal(annot: Annotation, held: list[str], row: float) -> str:
+    """Why this field may not take another annotation of this type, if it may not.
+
+    The first is free. A further one has to be on the field's own row: markup
+    that only qualified through `ROW_SLACK_PT` is the shape of an annotation
+    belonging to the neighbouring field, and that is the mistake this bound
+    exists to prevent - not the existence of a second statement.
+    """
+    if not held:
+        return ""
+    if len(held) >= MAX_PER_TYPE:
+        return (f"field already has {MAX_PER_TYPE} {annot.annot_type} links, "
+                "the most one field is allowed")
+    if row <= 0:
+        return (f"field already has a {annot.annot_type} link, and this one is "
+                "off its row - it most likely belongs to the neighbouring field")
+    return ""
 
 
 # --- scoring ---------------------------------------------------------------
@@ -88,7 +126,9 @@ def _candidates(annot: Annotation, page: Page, domain: str):
             continue                     # not on this field's row: not a candidate
         score, evidence = _score(annot, fld, page, domain, row, gap)
         if score >= MIN_LINK_SCORE:
-            yield annot, fld, score, evidence
+            # `row` rides along: assignment needs it to tell a field's own second
+            # annotation from the one that belongs to the field below.
+            yield annot, fld, score, evidence, row
 
 
 def _score(annot: Annotation, fld: Field, page: Page, domain: str,

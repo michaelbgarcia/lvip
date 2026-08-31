@@ -194,6 +194,72 @@ def test_a_repeat_down_a_column_is_still_drawn(blank_doc, tmp_path):
     assert not report.skipped
 
 
+# --- several annotations on one field --------------------------------------
+def _set(row_id, rel_y, texts, **kw):
+    """One field's annotation set, as the importer hands it over."""
+    rows = []
+    for seq, text in enumerate(texts, start=1):
+        r = _row(row_id, rel_y, text, **kw)
+        r.annot_seq = seq
+        rows.append(r)
+    return rows
+
+
+def test_a_fields_annotations_are_drawn_in_seq_order_along_its_row(blank_doc, tmp_path):
+    """The consent-date case: four statements, read left to right in the order
+    the reviewer put them in."""
+    rows = _set("consent", 0.30, ["DSTERM", "DSDECOD=INFORMED CONSENT OBTAINED",
+                                  "RFICDTC", "DSSTDTC"], rel_x=0.10)
+    report = write_annotations(blank_doc.path, rows, tmp_path / "set.pdf")
+    assert [p.text for p in report.placements] == [r.text_to_draw for r in rows]
+    xs = [p.rect.x0 for p in report.placements]
+    assert xs == sorted(xs), "annot_seq order is left-to-right reading order"
+    ys = [p.rect.cy for p in report.placements]
+    assert max(ys) - min(ys) < 2, "the set stays on the field's own row"
+
+
+def test_a_fields_annotations_do_not_overprint_each_other(blank_doc, tmp_path):
+    rows = _set("consent", 0.30, ["DSTERM", "RFICDTC", "DSSTDTC"], rel_x=0.10)
+    rects = [p.rect for p in write_annotations(
+        blank_doc.path, rows, tmp_path / "noover.pdf").placements]
+    assert not [(a, b) for i, a in enumerate(rects) for b in rects[i + 1:]
+                if a.h_overlap(b) > 0 and a.v_overlap(b) > 0]
+
+
+def test_siblings_are_never_deduplicated_against_each_other(blank_doc, tmp_path):
+    """Two annotations of one field share a box, so the row test cannot separate
+    them - and must not try. A repeated statement is the importer's call."""
+    rows = _set("consent", 0.30, ["DSTERM", "DSTERM"], rel_x=0.10)
+    report = write_annotations(blank_doc.path, rows, tmp_path / "twice.pdf")
+    assert len(report.placements) == 2 and not report.skipped
+
+
+def test_a_sibling_is_named_by_its_seq_in_the_report(blank_doc, tmp_path):
+    rows = _set("consent", 0.30, ["DSTERM", "RFICDTC"], rel_x=0.85)
+    report = write_annotations(blank_doc.path, rows, tmp_path / "named.pdf")
+    assert [p.label for p in report.placements] == ["consent", "consent#2"]
+    assert report.to_dict()["multi_annotation_fields"] == 1
+
+
+def test_a_whole_set_reaches_the_pdf(blank_doc, tmp_path):
+    out = tmp_path / "setpdf.pdf"
+    rows = _set("consent", 0.30, ["DSTERM", "RFICDTC", "DSSTDTC"], rel_x=0.10)
+    write_annotations(blank_doc.path, rows, out)
+    drawn = {a.text for a in parse_pdf(out).iter_annotations()}
+    assert drawn == {"DSTERM", "RFICDTC", "DSSTDTC"}
+
+
+def test_a_set_wraps_only_when_its_row_runs_out(blank_doc, tmp_path):
+    """Anchored near the right margin, the set cannot all fit on one row - so it
+    spills, rather than being drawn off the page or on top of itself."""
+    rows = _set("consent", 0.30, ["DSTERM", "DSDECOD=INFORMED CONSENT OBTAINED",
+                                  "RFICDTC"], rel_x=0.80)
+    report = write_annotations(blank_doc.path, rows, tmp_path / "wrap.pdf")
+    assert len(report.placements) == 3
+    assert all(p.rect.x1 <= 595 for p in report.placements)
+    assert report.adjusted, "a move off the anchor is always reported"
+
+
 def test_an_unavailable_font_is_substituted_and_said_so(blank_doc, tmp_path):
     row = _row("f", 0.3)
     row.font_name = "SponsorSans"
