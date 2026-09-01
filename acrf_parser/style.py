@@ -19,17 +19,29 @@ as a fraction of page size - so it survives a form being re-flowed.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import asdict, dataclass, field as dc_field
+from dataclasses import asdict, dataclass, field as dc_field, replace
 from statistics import median
 from typing import Any, Iterable
 
+from . import annotations as ann
 from .models import Annotation, Document
+from .normalize import statement_key
 from .template import relative_label
 
 MIN_SAMPLES = 3          # below this, report the observation but trust it less
 LOW_AGREEMENT = 0.7      # flagged as unsettled: the corpus does not agree
+MIN_FILL_SAMPLES = 2     # filled boxes needed before a domain's fill is a rule
 
 ANY_TYPE = "*"
+DOMAIN_SCOPE, STATEMENT_SCOPE = "domain:", "statement:"
+
+# Where a row's fill colour came from. Reported beside the colour, because a
+# fill nobody can account for is exactly the one a reviewer should look at.
+FILL_TYPE = "house style for this annotation type"
+FILL_DOMAIN = "house style for domain {domain}"
+FILL_STATEMENT = "this exact statement's fill in previous studies"
+FILL_UNDECIDED = ("corpus varies fill by domain and this statement's domain is "
+                  "unresolved - decide it")
 
 
 @dataclass
@@ -66,9 +78,26 @@ class StyleRule:
 
 @dataclass
 class HouseStyle:
-    """A sponsor's rendering conventions, per annotation type plus a default."""
+    """A sponsor's rendering conventions, per annotation type plus a default.
+
+    Fill colour gets two extra axes, because on real aCRFs it does not follow
+    the annotation type. A Disposition page draws `DSTERM` yellow and `RFICDTC`
+    blue - same type, same field, same row, different domain - so fill is
+    measured per domain as well, and the domain rule overrides the type rule for
+    the fill alone. Everything else (text colour, font, size, placement) still
+    comes from the type, because that is what the corpus shows varying with it.
+
+    `by_statement` is the fallback for the case that makes this hard: DM's own
+    variables carry no prefix, so nothing in `RFICDTC` says which domain it is.
+    Where the statement's domain is unresolvable, what the corpus drew for that
+    exact statement is the best evidence there is - and where there is none
+    either, the fill is left blank and said to be undecided rather than
+    defaulted into whatever the majority domain happens to use.
+    """
     default: StyleRule
     by_type: dict[str, StyleRule] = dc_field(default_factory=dict)
+    by_domain: dict[str, StyleRule] = dc_field(default_factory=dict)
+    by_statement: dict[str, StyleRule] = dc_field(default_factory=dict)
     documents: list[str] = dc_field(default_factory=list)
 
     def for_type(self, annot_type: str) -> StyleRule:
@@ -82,13 +111,69 @@ class HouseStyle:
             return rule
         return rule if rule and not self.default.samples else self.default
 
+    @property
+    def fill_varies_by_domain(self) -> bool:
+        """Does this corpus actually colour-code by domain?
+
+        Asked before any domain override is applied. A sponsor who fills every
+        box the same colour must keep behaving exactly as it did before the
+        domain axis existed - splitting a single convention across ten domains
+        would turn one settled rule into ten under-sampled ones for no gain.
+        """
+        fills = {r.fill_color for r in self.by_domain.values()
+                 if r.fill_color and r.fill_samples >= MIN_FILL_SAMPLES}
+        return len(fills) > 1
+
+    def for_annotation(self, annot_type: str, text: str = "",
+                       parsed: dict | None = None) -> tuple[StyleRule, str]:
+        """The rule for one specific statement, and where its fill came from.
+
+        Returns a copy: the caller gets a rule it may not mutate the corpus with,
+        and the reason string is exported beside the colour so a reviewer can see
+        why a row is the colour it is - or that nobody could say.
+        """
+        rule = replace(self.for_type(annot_type))
+        if not self.fill_varies_by_domain:
+            return rule, FILL_TYPE if rule.fill_color else ""
+
+        domain, _how = ann.statement_domain(text, parsed)
+        dom_rule = self.by_domain.get(domain) if domain else None
+        if dom_rule and dom_rule.fill_color and dom_rule.fill_samples >= MIN_FILL_SAMPLES:
+            return _with_fill(rule, dom_rule), FILL_DOMAIN.format(domain=domain)
+
+        seen = self.by_statement.get(statement_key(text))
+        if seen and seen.fill_color:
+            return _with_fill(rule, seen), FILL_STATEMENT
+
+        # No domain, no history. Blank rather than defaulted: on a corpus that
+        # colour-codes, the majority colour is a specific claim about which
+        # domain this is, and nothing here supports it.
+        return _with_fill(rule, None), FILL_UNDECIDED
+
     def unsettled(self) -> list[StyleRule]:
         """Rules the corpus disagrees on - what a human should decide once."""
         return [r for r in [self.default, *self.by_type.values()] if not r.settled]
 
+    def fill_rules(self) -> list[StyleRule]:
+        """The domain and statement rules, for the workbook's palette sheet."""
+        return [self.by_domain[k] for k in sorted(self.by_domain)] + \
+               [self.by_statement[k] for k in sorted(self.by_statement)]
+
     def to_dict(self) -> dict[str, Any]:
         return {"documents": self.documents, "default": asdict(self.default),
-                "by_type": {k: asdict(v) for k, v in sorted(self.by_type.items())}}
+                "fill_varies_by_domain": self.fill_varies_by_domain,
+                "by_type": {k: asdict(v) for k, v in sorted(self.by_type.items())},
+                "by_domain": {k: asdict(v) for k, v in sorted(self.by_domain.items())},
+                "by_statement": {k: asdict(v)
+                                 for k, v in sorted(self.by_statement.items())}}
+
+
+def _with_fill(rule: StyleRule, source: StyleRule | None) -> StyleRule:
+    """`rule`'s everything, `source`'s fill. Blank fill when there is no source."""
+    return replace(rule,
+                   fill_color=source.fill_color if source else None,
+                   fill_agreement=source.fill_agreement if source else 0.0,
+                   fill_samples=source.fill_samples if source else 0)
 
 
 def derive_house_style(docs: Document | Iterable[Document]) -> HouseStyle:
@@ -104,7 +189,32 @@ def derive_house_style(docs: Document | Iterable[Document]) -> HouseStyle:
             annot_type,
             [a for a in annots if a.annot_type == annot_type],
             [p for p in placements if p[0] == annot_type])
+    _add_fill_axes(style, annots)
     return style
+
+
+def _add_fill_axes(style: HouseStyle, annots: list[Annotation]) -> None:
+    """Measure fill per domain, and per statement where the domain is unresolvable.
+
+    Both axes are about the fill and nothing else, so placement is not passed in:
+    a domain does not have its own idea of where markup goes, only of what colour
+    it is.
+    """
+    by_domain: dict[str, list[Annotation]] = {}
+    orphans: dict[str, list[Annotation]] = {}
+    for a in annots:
+        domain, _how = ann.statement_domain(a.text, a.parsed)
+        if domain:
+            by_domain.setdefault(domain, []).append(a)
+        elif a.fill_color:
+            # No prefix to read a domain off (RFICDTC, AGE, SEX). What the corpus
+            # actually drew for this statement is the only evidence available.
+            orphans.setdefault(statement_key(a.text), []).append(a)
+    for domain, group in sorted(by_domain.items()):
+        style.by_domain[domain] = _rule(f"{DOMAIN_SCOPE}{domain}", group, [])
+    for key, group in sorted(orphans.items()):
+        style.by_statement[key] = _rule(
+            f"{STATEMENT_SCOPE}{group[0].text}", group, [])
 
 
 def _rule(scope: str, annots: list[Annotation], placements: list[tuple]) -> StyleRule:
@@ -195,7 +305,17 @@ def summarize_style(style: HouseStyle) -> dict[str, Any]:
         "placement": d.placement,
         "settled": d.settled,
         "unsettled_scopes": [r.scope for r in style.unsettled()],
+        "fill_varies_by_domain": style.fill_varies_by_domain,
+        "domain_fills": {r.scope.removeprefix(DOMAIN_SCOPE): _hex(r.fill_color)
+                         for r in style.by_domain.values() if r.fill_color},
+        "statement_fills": len(style.by_statement),
     }
+
+
+def _hex(color) -> str:
+    if not color:
+        return ""
+    return "#" + "".join(f"{max(0, min(255, round(c * 255))):02X}" for c in color[:3])
 
 
 def derive_house_style_from_kb(kb) -> HouseStyle:
@@ -207,8 +327,8 @@ def derive_house_style_from_kb(kb) -> HouseStyle:
     computed at write time - so the geometry logic lives in exactly one place.
     """
     rows = [dict(r) for r in kb.con.execute(
-        "SELECT annot_type, text_color, fill_color, font_name, font_size"
-        " FROM annotations")]
+        "SELECT annot_type, text, parsed, text_color, fill_color, font_name,"
+        " font_size FROM annotations")]
     placements = [dict(r) for r in kb.con.execute(
         "SELECT a.annot_type, l.relative_label, l.offset_x_pct, l.offset_y_pct"
         " FROM links l JOIN annotations a ON a.id = l.annotation_id"
@@ -225,17 +345,25 @@ def derive_house_style_from_kb(kb) -> HouseStyle:
             annot_type,
             [a for a in annots if a.annot_type == annot_type],
             [p for p in places if p[0] == annot_type])
+    _add_fill_axes(house, annots)
     return house
 
 
 def _row_as_annotation(row: dict) -> Annotation:
-    """Just enough of an Annotation for the aggregator; geometry comes separately."""
+    """Just enough of an Annotation for the aggregator; geometry comes separately.
+
+    `text` and `parsed` are carried through so the fill axes can ask which
+    domain each statement belongs to - the offline path has to reach the same
+    answer as the in-memory one or the two would disagree about colour.
+    """
     import json
     from .models import BBox
-    color = json.loads(row["text_color"]) if row.get("text_color") else None
-    fill = json.loads(row["fill_color"]) if row.get("fill_color") else None
-    return Annotation(page=0, text="x", bbox=BBox.of((0, 0, 1, 1)),
+    load = lambda k: json.loads(row[k]) if row.get(k) else None
+    color, fill = load("text_color"), load("fill_color")
+    parsed = load("parsed")
+    return Annotation(page=0, text=row.get("text") or "x", bbox=BBox.of((0, 0, 1, 1)),
                       annot_type=row["annot_type"] or "",
+                      parsed=parsed if isinstance(parsed, dict) else {},
                       text_color=tuple(color) if color else None,
                       fill_color=tuple(fill) if fill else None,
                       font_name=row.get("font_name") or "",

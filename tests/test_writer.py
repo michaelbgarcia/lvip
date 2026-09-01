@@ -40,6 +40,11 @@ def approved(blank_doc, index, house, tmp_path_factory):
     return read_staging(out, blank_doc)
 
 
+# One form-header row per page of the blank CRF: five pages, five forms' worth
+# of markup that belongs to no field.
+FORM_ROWS = 5
+
+
 # --- the loop --------------------------------------------------------------
 def test_written_annotations_survive_a_reparse(approved, blank_doc, tmp_path):
     """The whole pipeline, checked by an independent read of its own output.
@@ -51,15 +56,30 @@ def test_written_annotations_survive_a_reparse(approved, blank_doc, tmp_path):
     """
     out = tmp_path / "annotated.pdf"
     report = write_annotations(blank_doc.path, approved.rows, out)
-    assert len(report.placements) == 9 and not report.adjusted
+    # 9 field annotations plus one form header per page, and nothing had to move.
+    assert len(report.placements) == 9 + FORM_ROWS and not report.adjusted
 
     again = parse_pdf(out)
-    assert len(list(again.iter_annotations())) == 9
+    assert len(list(again.iter_annotations())) == 9 + FORM_ROWS
 
     linked = {l.field_id: again.annotation(l.annotation_id).text
               for l in again.links if not l.rejected}
-    expected = {r.row_id: r.text_to_draw for r in approved.approved()}
+    expected = {r.row_id: r.text_to_draw for r in approved.approved()
+                if r.scope != "FORM"}
     assert linked == expected
+
+    # The form-level layer comes back as form-level: read afresh off the page it
+    # was just written to, with no workbook to consult. Before it was written it
+    # was simply absent from the output, which no round trip could catch.
+    headers = {a.text for a in again.form_annotations()}
+    assert {"DM=Demographics", "MH=Medical History", "EL=Eligibility"} <= headers
+    assert len(again.form_annotations()) == FORM_ROWS
+    # Not DS=Disposition, and that is the blank CRF's known weakness rather than
+    # this phase's: page 4 prints no title, so it inherits Medical History from
+    # page 3 and history answers for the form it was told. `form_name` is
+    # editable for exactly this - and the form row is now where a reviewer sees
+    # the misattribution first, instead of it being invisible until the PDF.
+    assert "DS=Disposition" not in headers
 
 
 def test_the_style_the_sheet_asked_for_is_what_lands(approved, blank_doc, tmp_path):
@@ -287,7 +307,9 @@ def test_variable_alone_is_enough_to_draw(blank_doc, tmp_path):
 def test_report_summary(approved, blank_doc, tmp_path):
     report = write_annotations(blank_doc.path, approved.rows, tmp_path / "s.pdf")
     d = report.to_dict()
-    assert d["written"] == 9 and d["skipped"] == 5 and d["adjusted"] == 0
+    assert d["written"] == 9 + FORM_ROWS and d["skipped"] == 5 and d["adjusted"] == 0
+    assert d["fields"] == 9 and d["form_annotations"] == FORM_ROWS
+    assert d["pages_with_form_markup"] == FORM_ROWS
 
 
 def test_the_fill_from_history_lands_on_the_page(approved, blank_doc, tmp_path):

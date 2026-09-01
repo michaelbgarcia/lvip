@@ -51,6 +51,34 @@ def second_doc(tmp_path_factory):
 
 
 @pytest.fixture(scope="session")
+def coloured_doc(tmp_path_factory):
+    """A study that colour-codes its markup by SDTM domain.
+
+    The shape of a real Informed Consent page: several form-level annotations
+    across the top, and one field carrying DS markup and DM markup side by side
+    in different fills.
+    """
+    from acrf_parser import parse_pdf
+    from tests.sample_pdf import build_colour_coded_study
+    return parse_pdf(build_colour_coded_study(
+        tmp_path_factory.mktemp("pdf3") / "coloured.pdf"))
+
+
+@pytest.fixture(scope="session")
+def coloured_blank(coloured_doc, tmp_path_factory):
+    """The same CRF stripped of its markup - the next study's blank form."""
+    from acrf_parser import parse_pdf
+    out = tmp_path_factory.mktemp("blank3") / "coloured_blank.pdf"
+    pdf = pymupdf.open(coloured_doc.path)
+    for page in pdf:
+        for annot in list(page.annots() or []):
+            page.delete_annot(annot)
+    pdf.save(out)
+    pdf.close()
+    return parse_pdf(out)
+
+
+@pytest.fixture(scope="session")
 def corpus(doc, second_doc):
     """Two finished studies standing in for a historical corpus."""
     return [doc, second_doc]

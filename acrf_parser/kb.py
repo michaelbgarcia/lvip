@@ -99,6 +99,14 @@ CREATE TABLE IF NOT EXISTS annotations (
     fill_source   TEXT,
     font_name     TEXT,
     font_size     REAL,
+    -- FIELD | FORM. Markup that describes the form rather than any one question
+    -- reaches no field, so it has no `links` row to carry its meaning. Without
+    -- this column it is indistinguishable from markup the linker failed to
+    -- place, and the form-level layer cannot be learned at all.
+    scope         TEXT NOT NULL DEFAULT 'FIELD',
+    -- Only set on FORM rows, which have no link to hold it: how much a reviewer
+    -- had to do with this annotation. Field markup carries trust on its link.
+    trust         TEXT,
     UNIQUE (document_id, annot_ref)
 );
 
@@ -150,6 +158,32 @@ JOIN   annotations a ON a.id = l.annotation_id
 JOIN   documents d   ON d.id = f.document_id
 WHERE  l.trust = 'HUMAN_REJECTED';
 
+-- The form-level layer: markup that belongs to a form rather than to one of its
+-- questions. No join through `links`, because that is the whole point - this
+-- markup never reaches a field, and joining through links is what lost it.
+CREATE VIEW IF NOT EXISTS form_annotations AS
+SELECT d.file_name, fm.name AS form_name, fm.normalized_name, fm.domain,
+       a.page, a.text AS annotation_text, a.annot_type, a.variable, a.value,
+       -- Where it was drawn. A form's set is ordered by it, so a row of domain
+       -- headers comes back left to right, the order it was written and read in.
+       a.bbox AS annotation_bbox,
+       COALESCE(a.trust, 'GEOMETRIC') AS trust, a.confidence
+FROM   annotations a
+JOIN   forms fm     ON fm.id = a.form_id
+JOIN   documents d  ON d.id = a.document_id
+WHERE  a.scope = 'FORM'
+  AND  COALESCE(a.trust, 'GEOMETRIC') != 'HUMAN_REJECTED';
+
+-- Form-level markup a reviewer struck out. Keyed the way the form-level
+-- rejection list is: "form|<normalized form name>".
+CREATE VIEW IF NOT EXISTS rejected_form_suggestions AS
+SELECT 'form|' || fm.normalized_name AS form_key,
+       a.text AS annotation_text, d.file_name
+FROM   annotations a
+JOIN   forms fm     ON fm.id = a.form_id
+JOIN   documents d  ON d.id = a.document_id
+WHERE  a.scope = 'FORM' AND a.trust = 'HUMAN_REJECTED';
+
 -- Occurrences folded into one row per (form, field). `variants` > 1 means the
 -- pages of one form disagree - a review item, not something to hide.
 CREATE VIEW IF NOT EXISTS field_map AS
@@ -169,11 +203,14 @@ GROUP  BY field_key, form_name, field_text;
 _ADDED_COLUMNS = [
     ("annotations", "fill_color", "TEXT"),
     ("annotations", "fill_source", "TEXT"),
+    ("annotations", "scope", "TEXT NOT NULL DEFAULT 'FIELD'"),
+    ("annotations", "trust", "TEXT"),
 ]
 
 # Views are derived, so a changed one is re-created rather than migrated. Named
 # here so `_migrate` drops exactly the views `SCHEMA` re-creates.
-_VIEWS = ["field_annotations", "rejected_suggestions", "field_map"]
+_VIEWS = ["field_annotations", "rejected_suggestions", "field_map",
+          "form_annotations", "rejected_form_suggestions"]
 
 
 def connect(db_path: str | Path) -> sqlite3.Connection:
@@ -290,8 +327,8 @@ def _insert_annotations(con, doc: Document, doc_id: int, form_ids: dict[str, int
                 "INSERT INTO annotations (document_id, form_id, annot_ref, page, text,"
                 " annot_type, confidence, variable, domain, value, qnam, target_page,"
                 " parsed, evidence, bbox, relative, text_color, fill_color,"
-                " fill_source, font_name, font_size)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " fill_source, font_name, font_size, scope, trust)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (doc_id, form_ids.get(normalize(a.form_name)), a.id, a.page, a.text,
                  a.annot_type, a.type_confidence, p.get("variable"), p.get("domain"),
                  p.get("value"), p.get("qnam"), p.get("target_page"),
@@ -301,9 +338,24 @@ def _insert_annotations(con, doc: Document, doc_id: int, form_ids: dict[str, int
                  json.dumps(list(a.text_color)) if a.text_color else None,
                  json.dumps(list(a.fill_color)) if a.fill_color else None,
                  a.fill_source or None,
-                 a.font_name or None, a.font_size or None))
+                 a.font_name or None, a.font_size or None,
+                 a.scope or "FIELD", _annot_trust(a)))
             ids[a.id] = int(cur.lastrowid)
     return ids
+
+
+def _annot_trust(a) -> str | None:
+    """Trust for a FORM annotation, which has no link to carry it.
+
+    Read off `scope_evidence`, where the ingest path records the reviewer's
+    verdict. A parsed (rather than reviewed) annotation has none, and NULL reads
+    as GEOMETRIC in the views - which is what it is.
+    """
+    from .models import HUMAN_APPROVED, HUMAN_REJECTED
+    for e in a.scope_evidence or ():
+        if e in (HUMAN_APPROVED, HUMAN_REJECTED):
+            return e
+    return None
 
 
 def _insert_links(con, doc: Document, doc_id: int, field_ids, annot_ids) -> None:
@@ -389,6 +441,7 @@ class KnowledgeBase:
             "forms": one("SELECT COUNT(*) FROM forms"),
             "fields": one("SELECT COUNT(*) FROM fields"),
             "annotations": one("SELECT COUNT(*) FROM annotations"),
+            "form_annotations": one("SELECT COUNT(*) FROM form_annotations"),
             "links": one("SELECT COUNT(*) FROM links WHERE rejected = 0"),
             "mapped_keys": one("SELECT COUNT(*) FROM field_map"),
         }
@@ -450,6 +503,7 @@ def _document_from_review(report, blank_doc: Document, source: str | None) -> Do
                  for f in blank_doc.forms]
 
     by_id = {f.id: f for f in doc.iter_fields()}
+    anchors = {a.id: a for a in doc.iter_anchors()}
     rows = [(r, HUMAN_APPROVED) for r in report.approved()]
     rows += [(r, HUMAN_REJECTED) for r in report.rejected()]
     # Within a field, in the order they were drawn. A field's annotations are
@@ -461,6 +515,15 @@ def _document_from_review(report, blank_doc: Document, source: str | None) -> Do
         page.annotations = []
     laid: dict[str, float] = {}          # field -> right edge of its last annotation
     for i, (row, trust) in enumerate(rows):
+        anchor = anchors.get(row.row_id)
+        if anchor is not None:
+            page = doc.page(anchor.page)
+            if page is not None:
+                page.annotations.append(_form_annotation_from_row(
+                    row, anchor, page, i, trust, laid.get(row.row_id)))
+                if trust == HUMAN_APPROVED:
+                    laid[row.row_id] = page.annotations[-1].bbox.x1
+            continue
         fld = by_id.get(row.row_id)
         page = doc.page(fld.page) if fld else None
         if not (fld and page):
@@ -517,6 +580,38 @@ def _annotation_from_row(row, fld, page, text: str, index: int,
         type_confidence=LEARNED_CONFIDENCE, type_evidence=["approved by a reviewer"],
         parts=[parsed], text_color=row.text_color, font_name=row.font_name,
         font_size=row.font_size)
+
+
+def _form_annotation_from_row(row, anchor, page, index: int, trust: str,
+                              after_x: float | None = None):
+    """A reviewer's form-level decision, as an Annotation the corpus can learn.
+
+    No `Link` is created and none is wanted: this markup belongs to the form, and
+    a link would be a claim that it belongs to some field. The reviewer's verdict
+    rides on the annotation's own `trust` column instead - which is why that
+    column exists.
+
+    Laid out along the header band exactly as the writer lays it, so the next
+    study learns the order the headers were actually drawn in.
+    """
+    from .models import FORM_SCOPE, HUMAN_REJECTED, Annotation, BBox
+    from .annotations import classify
+    text = (row.text_to_draw if trust != HUMAN_REJECTED
+            else row.suggested_annotation or row.suggested_variable)
+    parsed = classify(text, first=True)
+    size = row.font_size or 8.0
+    x0 = anchor.bbox.x0 if after_x is None else after_x + SIBLING_GAP_PT
+    box = BBox(round(x0, 2), round(anchor.bbox.y0, 2),
+               round(x0 + max(len(text), 1) * size * 0.55, 2), round(anchor.bbox.y1, 2))
+    return Annotation(
+        page=anchor.page, text=text, bbox=box, subtype="FreeText",
+        id=f"p{anchor.page}h{index}", form_name=row.form_name or anchor.form_name,
+        annot_type=row.annot_type or parsed.annot_type, parsed=dict(parsed.parsed),
+        type_confidence=LEARNED_CONFIDENCE,
+        type_evidence=["form-level decision in the staging workbook"],
+        parts=[parsed], text_color=row.text_color, fill_color=row.fill_color,
+        font_name=row.font_name, font_size=row.font_size,
+        scope=FORM_SCOPE, scope_evidence=[trust])
 
 
 def _link_from_row(row, fld, annot, trust: str):

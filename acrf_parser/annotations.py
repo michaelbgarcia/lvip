@@ -245,6 +245,55 @@ def _unquote(v: str) -> str:
     return v.strip().strip('"\'').strip()
 
 
+# --- which domain does a statement belong to? ------------------------------
+QUALIFIED, PREFIX, UNRESOLVED = "qualified", "prefix", "unresolved"
+
+# A real suffix behind a domain code. Length is what keeps AGE ("AG" + "E") and
+# SEX ("SE" + "X") from reading as AG- and SE-domain variables.
+_DOMAIN_SUFFIX = re.compile(r"^[A-Z][A-Z0-9]{2,}$")
+
+
+def statement_domain(text: str, parsed: dict | None = None) -> tuple[str, str]:
+    """The SDTM domain a single statement belongs to, and how that was decided.
+
+    Needed because a sponsor's house style can key on it. On a real Disposition
+    page `DSTERM` and `RFICDTC` are both plain VARIABLE markup, on the same
+    field, on the same row - and they are drawn in different colours, because
+    one is DS and the other is DM. Type alone cannot tell them apart.
+
+    Two deterministic answers and one honest refusal:
+
+        DM.BRTHDTC / SUPPDS.QVAL / DS=Disposition   -> DM, DS, DS   (qualified)
+        DSSTDTC                                     -> DS           (prefix)
+        RFICDTC, AGE, SEX, BRTHDTC                  -> ""           (unresolved)
+
+    The refusal is the important case and it must stay a refusal. DM's own
+    variables carry no prefix, so nothing in `RFICDTC` says DM; falling back to
+    the *form's* domain would answer "DS" on the very page where the distinction
+    matters. An unresolved domain is a question for history or for a human, not
+    something to guess at here.
+
+    `parsed` is optional: given bare text - which is all a staging row has - the
+    text is classified with the same rules the parser uses, so the workbook and
+    the corpus cannot disagree about which domain a statement belongs to.
+    """
+    parsed = parsed or classify(text).parsed or {}
+    dom = (parsed.get("domain") or "").upper()
+    if dom:
+        return dom, QUALIFIED
+    m = re.match(rf"^\s*(?P<dom>[A-Z]{{2}})\.(?:{_VAR_TOKEN})\s*$", (text or "").strip())
+    if m:
+        return m.group("dom"), QUALIFIED
+    var = (parsed.get("variable") or "").upper()
+    if not var:
+        bare = _PURE_VAR.match((text or "").strip())
+        var = bare.group("var").upper() if bare else ""
+    prefix, rest = var[:2], var[2:]
+    if prefix in DOMAINS and _DOMAIN_SUFFIX.match(rest):
+        return prefix, PREFIX
+    return "", UNRESOLVED
+
+
 # --- reporting -------------------------------------------------------------
 def summarize_annotations(annots: list[Annotation]) -> dict:
     counts: dict[str, int] = {}

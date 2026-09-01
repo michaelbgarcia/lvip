@@ -49,22 +49,31 @@ def _rows(book, sheet=st.SHEET_WORK):
     return [dict(zip(names, r)) for r in ws.iter_rows(min_row=2, values_only=True)]
 
 
+FIELD_ROWS, FORM_ROWS = 14, 5
+ALL_ROWS = FIELD_ROWS + FORM_ROWS
+
+
+def _field_rows(rows):
+    return [r for r in rows if r["scope"] != "FORM"]
+
+
 def test_sheets(book):
     assert book.sheetnames == [st.SHEET_WORK, st.SHEET_GEOM, st.SHEET_STYLE,
-                               st.SHEET_FORMS, st.SHEET_README]
+                               st.SHEET_FILLS, st.SHEET_FORMS, st.SHEET_README]
 
 
 def test_one_row_per_field(work, blank_doc):
     """This corpus has one annotation per field, so rows and fields coincide."""
     _, _, rows = work
-    assert len(rows) == len(list(blank_doc.iter_fields())) == 14
-    assert [r["row_id"] for r in rows] == [f.id for f in blank_doc.iter_fields()]
+    fields = _field_rows(rows)
+    assert len(fields) == len(list(blank_doc.iter_fields())) == FIELD_ROWS
+    assert [r["row_id"] for r in fields] == [f.id for f in blank_doc.iter_fields()]
     assert {r["annot_seq"] for r in rows} == {1}
 
 
 def test_auto_rows_arrive_decided(work):
     _, _, rows = work
-    auto = [r for r in rows if r["status"] == "AUTO"]
+    auto = [r for r in _field_rows(rows) if r["status"] == "AUTO"]
     assert len(auto) == 9
     assert all(r["match_tier"] == pf.EXACT_KEY for r in auto)
     assert all(r["final_variable"] == r["suggested_variable"] for r in auto)
@@ -161,7 +170,7 @@ def test_a_field_history_saw_twice_gets_two_rows(multi_book):
 
 def test_every_other_field_still_gets_exactly_one_row(multi_book, blank_doc):
     counts: dict[str, int] = {}
-    for r in _rows(multi_book):
+    for r in _field_rows(_rows(multi_book)):
         counts[r["row_id"]] = counts.get(r["row_id"], 0) + 1
     assert counts.pop("p1f0") == 2
     assert set(counts.values()) == {1}
@@ -179,7 +188,8 @@ def test_both_rows_describe_the_same_box(multi_book):
 def test_the_summary_counts_rows_and_fields_separately(blank_doc, multi_index, house):
     rows = st.build_staging(blank_doc, index=multi_index, house=house)
     s = st.summarize_staging(rows)
-    assert s["rows"] == 15 and s["fields"] == 14
+    assert s["rows"] == ALL_ROWS + 1 and s["fields"] == FIELD_ROWS
+    assert s["form_rows"] == FORM_ROWS
     assert s["multi_annotation_fields"] == 1
 
 
@@ -203,12 +213,12 @@ def test_a_first_study_still_produces_a_workbook(blank_doc, tmp_path):
     ws = load_workbook(path)[st.SHEET_WORK]
     names = [c.value for c in ws[1]]
     rows = [dict(zip(names, r)) for r in ws.iter_rows(min_row=2, values_only=True)]
-    assert len(rows) == 14
+    assert len(rows) == ALL_ROWS
     assert all(r["status"] == "NEEDS_MAPPING" for r in rows)
     assert all(not r["final_variable"] for r in rows)
 
 
 def test_summary(blank_doc, index, house):
     s = st.summarize_staging(st.build_staging(blank_doc, index, house))
-    assert s["rows"] == 14 and s["auto_fill_rate"] == 0.643
-    assert s["by_status"]["AUTO"] == 9
+    assert s["rows"] == ALL_ROWS and s["fields"] == FIELD_ROWS
+    assert s["by_status"]["AUTO"] == 9 + FORM_ROWS

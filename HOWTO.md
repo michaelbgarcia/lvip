@@ -110,6 +110,7 @@ Open the staging XLSX: rows are pre-filled with a tier (`EXACT_KEY`,
 `NEEDS_MAPPING`) plus the score/source study for anything fuzzy. Only
 `EXACT_KEY` rows arrive pre-approved; everything else needs a human or agent
 decision. Geometry lives on a separate, locked `Geometry` sheet — don't hand-edit it.
+`DomainFills` carries the study's measured fill palette per SDTM domain.
 
 **One row is one annotation.** A field with several annotations has several rows,
 sharing a `row_id` and numbered 1, 2, 3… in `annot_seq`. Where history has seen a
@@ -122,6 +123,27 @@ to. Write one statement per row rather than several in one cell: each row keeps
 its own type, colour and placement, and they are drawn side by side in
 `annot_seq` order. `(row_id, annot_seq)` must be unique, and a field must keep at
 least one row.
+
+**Some rows belong to the form, not to a field.** The markup across the top of a
+page — the domain header(s) and any form-level constants — belongs to no printed
+question, so it gets its own rows: `scope` = `FORM`, `row_id` = `p<page>h`, and
+`field_text` reading `[form header] <form name>`. A page usually carries more
+than one: two domain headers side by side (`DS=Disposition`, `DM=Demographics`)
+plus constants such as `DSCAT = PROTOCOL MILESTONE`. They work exactly like a
+field's rows — copy and bump `annot_seq` to add another — and are drawn left to
+right across the header band in `annot_seq` order. Unlike a field, a page may
+legitimately end up with none; say so by setting the row `REJECTED` with a
+reason rather than deleting it, so the corpus learns from the decision.
+
+**Fills follow the domain, not the annotation type.** A study that colour-codes
+draws `DSTERM` and `RFICDTC` in different colours even though both are plain
+`VARIABLE` markup on the same field. The `DomainFills` sheet is the measured
+palette; `fill_basis` on each row says where that row's colour came from. Where
+it reads *"corpus varies fill by domain and this statement's domain is
+unresolved"*, `fill_rgb` is deliberately blank and needs a decision — DM's own
+variables carry no prefix, so nothing in `RFICDTC` says DM. Take the colour from
+`DomainFills`; never copy the majority colour, which is a claim about which
+domain the statement is.
 
 With no `--corpus`, the workbook still gets written — every row just comes
 back `NEEDS_MAPPING`, which is the honest state of a first study.

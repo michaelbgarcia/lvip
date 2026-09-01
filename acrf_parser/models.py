@@ -190,6 +190,10 @@ class TextGroup:
         return bool(self.lines) and all(l.from_annotation for l in self.lines)
 
 
+# Whether a piece of markup belongs to one CRF question or to the form itself.
+FIELD_SCOPE, FORM_SCOPE = "FIELD", "FORM"
+
+
 @dataclass
 class AnnotationPart:
     """One markup statement. An annotation box often holds several ("AESTDTC
@@ -236,6 +240,13 @@ class Annotation:
     type_evidence: list[str] = field(default_factory=list)
     parts: list[AnnotationPart] = field(default_factory=list)
     form_name: str = ""
+    # FIELD | FORM. Markup that describes the *form* rather than any one question
+    # - the domain headers at the top of a page, and the form-level constants
+    # drawn beside them - reaches no field and so has no Link to carry its
+    # meaning. Without this it is indistinguishable from markup the linker simply
+    # failed to place, which is why it was previously parsed and then lost.
+    scope: str = FIELD_SCOPE
+    scope_evidence: list[str] = field(default_factory=list)
 
     @property
     def normalized_text(self) -> str:
@@ -321,6 +332,47 @@ class Field:
         return (normalize(self.form_name), self.normalized_text)
 
 
+@dataclass
+class FormAnchor:
+    """Where a page's form-level markup goes, on a CRF that has none yet.
+
+    A domain header ("DS=Disposition") and the constants drawn beside it
+    ("DSCAT = PROTOCOL MILESTONE") belong to the *form*, not to any printed
+    question, so there is no `Field` to hang them off - and every mechanism
+    downstream is keyed on a field id. This is that missing hook: one per page,
+    with an id shaped like a field's so `(row_id, annot_seq)`, the Geometry
+    sheet, the importer and the writer all work on it unchanged.
+
+    The box is deliberately zero-width. It is a *starting point* at the left of
+    the page's header band, not a thing markup is placed beside: the first
+    annotation lands on it and the rest chain rightwards from there, which is
+    how a row of domain headers is drawn and read.
+    """
+    id: str                           # p<page>h, alongside a field's p<page>f<n>
+    form_name: str
+    page: int
+    bbox: BBox
+    domain: str = ""                  # resolved where the document or history says
+    evidence: list[str] = field(default_factory=list)
+
+    @property
+    def text(self) -> str:
+        """How the row names itself in the workbook.
+
+        Not a question, and it must not read like one: a reviewer scanning the
+        sheet has to be able to tell at a glance that this row is about the form.
+        """
+        return f"[form header] {self.form_name}".strip()
+
+    @property
+    def normalized_text(self) -> str:
+        return normalize(self.text)
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (normalize(self.form_name), self.normalized_text)
+
+
 # How a link came to exist. Ranked: a reviewer's decision outranks anything the
 # geometry inferred, and an explicit rejection is evidence in its own right.
 GEOMETRIC, HUMAN_APPROVED, HUMAN_REJECTED = "GEOMETRIC", "HUMAN_APPROVED", "HUMAN_REJECTED"
@@ -367,6 +419,9 @@ class Page:
     form_evidence: list[str] = field(default_factory=list)
     cross_references: list[CrossReference] = field(default_factory=list)
     fields: list[Field] = field(default_factory=list)
+    # Phase 3b. At most one, and only where the page belongs to a form - markup
+    # about a form nobody could name has nowhere to be filed.
+    anchor: "FormAnchor | None" = None
 
     @property
     def normalized_text(self) -> str:
@@ -411,6 +466,19 @@ class Document:
     def iter_fields(self) -> Iterator[Field]:
         for p in self.pages:
             yield from p.fields
+
+    def iter_anchors(self) -> Iterator[FormAnchor]:
+        for p in self.pages:
+            if p.anchor is not None:
+                yield p.anchor
+
+    def anchor(self, anchor_id: str) -> "FormAnchor | None":
+        return next((a for a in self.iter_anchors() if a.id == anchor_id), None)
+
+    def form_annotations(self, page: int | None = None) -> list[Annotation]:
+        """Markup that describes a form rather than one of its questions."""
+        return [a for a in self.iter_annotations()
+                if a.scope == FORM_SCOPE and (page is None or a.page == page)]
 
     def form(self, name: str) -> Form | None:
         """Look a form up by name, normalized so "Form: Demographics" matches."""

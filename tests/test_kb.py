@@ -23,7 +23,10 @@ def two_study_db(doc, second_doc, tmp_path):
 
 def test_everything_lands(db):
     assert db.stats() == {"documents": 1, "forms": 4, "fields": 14,
-                          "annotations": 17, "links": 9, "mapped_keys": 9}
+                          "annotations": 17, "links": 9, "mapped_keys": 9,
+                          # The domain headers: markup with no field to link to,
+                          # which is why it needs a count of its own.
+                          "form_annotations": 4}
 
 
 def test_lookup_returns_the_variable(db):
@@ -146,3 +149,46 @@ def test_kb_migrates_an_older_database(tmp_path, doc):
         assert con.execute("SELECT COUNT(*) FROM annotations").fetchone()[0] > 0
     finally:
         con.close()
+
+
+def test_an_older_corpus_migrates_and_defaults_to_field_scope(tmp_path):
+    """`CREATE TABLE IF NOT EXISTS` leaves an existing database on its old shape,
+    so the scope and trust columns have to be added rather than assumed.
+
+    They default to FIELD, which is the honest answer: a corpus ingested before
+    the form-level layer existed has no record of which of its annotations were
+    form-level. Re-ingesting those PDFs is what recovers it - the migration must
+    not invent the distinction.
+    """
+    import re
+    import sqlite3
+    from acrf_parser import kb as kbmod
+
+    old = kbmod.SCHEMA
+    for line in ("    scope         TEXT NOT NULL DEFAULT 'FIELD',\n",
+                 "    trust         TEXT,\n"):
+        old = old.replace(line, "")
+    for view in ("form_annotations", "rejected_form_suggestions"):
+        old = re.sub(rf"CREATE VIEW IF NOT EXISTS {view} AS.*?;\n", "", old, flags=re.S)
+
+    path = tmp_path / "old.sqlite"
+    con = sqlite3.connect(path)
+    con.executescript(old)
+    con.execute("INSERT INTO documents (path, file_name, page_count, parsed_at)"
+                " VALUES ('a', 'a.pdf', 1, 'x')")
+    con.execute("INSERT INTO forms (document_id, name, normalized_name, domain,"
+                " pages, continuation_pages, confidence)"
+                " VALUES (1, 'DS', 'ds', 'DS', '[1]', '[]', 1.0)")
+    con.execute("INSERT INTO annotations (document_id, form_id, annot_ref, page,"
+                " text, annot_type, confidence, bbox, relative)"
+                " VALUES (1, 1, 'p1a0', 1, 'DS=Disposition', 'DOMAIN_HEADER',"
+                " 0.95, '[0,0,1,1]', '{}')")
+    con.commit()
+    con.close()
+
+    with kbmod.KnowledgeBase(path) as db:
+        columns = {r[1] for r in db.con.execute("PRAGMA table_info(annotations)")}
+        assert {"scope", "trust"} <= columns
+        assert db.stats()["form_annotations"] == 0
+        assert db.con.execute(
+            "SELECT scope FROM annotations").fetchone()[0] == "FIELD"

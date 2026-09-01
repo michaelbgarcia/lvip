@@ -177,5 +177,74 @@ def build_second_study(path: str | Path) -> Path:
     return path
 
 
+# A third study, colour-coded by domain, reproducing the shape of a real
+# Informed Consent page. Two things the other two fixtures cannot express:
+#
+# * **Several form-level annotations on one page.** DS=Disposition and
+#   DM=Demographics side by side, plus a form-level constant beside them. None
+#   of it belongs to a printed question.
+# * **Fill that follows the domain, not the annotation type.** DSTERM and
+#   RFICDTC are both plain VARIABLE markup on the same field on the same row,
+#   drawn in different colours because one is DS and the other is DM. RFICDTC is
+#   the hard half: DM's own variables carry no prefix, so nothing in the text
+#   says DM and only the corpus's own history can answer for it.
+DS_FILL = (1.0, 0.98, 0.77)      # pale yellow
+DM_FILL = (0.78, 0.89, 0.96)     # pale blue
+
+CONSENT_FORM_LEVEL = [
+    ("DS=Disposition", 60, 22, DS_FILL),
+    ("DM=Demographics", 190, 22, DM_FILL),
+    ("DSCAT = PROTOCOL MILESTONE", 320, 22, DS_FILL),
+]
+CONSENT_FIELD_LEVEL = [
+    ("DSTERM", 250, 130, DS_FILL),
+    ("DSDECOD=INFORMED CONSENT OBTAINED", 310, 130, DS_FILL),
+    ("RFICDTC", 470, 130, DM_FILL),
+    ("DSSTDTC", 520, 130, DS_FILL),
+]
+# A Demographics page, so the DM fill is attested by more than one statement.
+# Written qualified (DM.BRTHDTC), which is how a sponsor says "DM" about a
+# variable whose own name does not.
+DEMOG_MARKUP = [
+    ("DM=Demographics", 60, 22, DM_FILL),
+    ("DM.BRTHDTC", 250, 130, DM_FILL),
+    ("DM.SEX", 250, 160, DM_FILL),
+]
+
+
+def _freetext(page, text, x, y, fill, width=200):
+    a = page.add_freetext_annot(pymupdf.Rect(x, y - 12, x + width, y + 4), text,
+                                fontsize=8, text_color=RED, fill_color=fill)
+    a.set_info(content=text, title="annotator")
+    a.update(text_color=RED, fill_color=fill)
+
+
+def build_colour_coded_study(path: str | Path) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = pymupdf.open()
+
+    page = doc.new_page()
+    page.insert_text((60, 60), "Form: Informed Consent", fontsize=13, fontname="hebo")
+    page.insert_text((60, 76), "Generated On: 10 Jun 2019 17:31:09", fontsize=9)
+    page.insert_text((60, 130), "Date of informed consent", fontsize=10)
+    page.draw_rect(pymupdf.Rect(180, 119, 240, 134))
+    for text, x, y, fill in CONSENT_FORM_LEVEL + CONSENT_FIELD_LEVEL:
+        _freetext(page, text, x, y, fill, width=min(200, 6 * len(text)))
+
+    page = doc.new_page()
+    page.insert_text((60, 60), "Form: Demographics", fontsize=13, fontname="hebo")
+    page.insert_text((60, 130), "Date of birth", fontsize=10)
+    page.insert_text((60, 160), "Sex", fontsize=10)
+    for y in (130, 160):
+        page.draw_rect(pymupdf.Rect(180, y - 11, 240, y + 4))
+    for text, x, y, fill in DEMOG_MARKUP:
+        _freetext(page, text, x, y, fill, width=min(200, 6 * len(text)))
+
+    doc.save(path)
+    doc.close()
+    return path
+
+
 if __name__ == "__main__":
     print(build(Path(__file__).resolve().parents[1] / "data" / "sample_acrf.pdf"))

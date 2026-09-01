@@ -52,7 +52,8 @@ from dataclasses import dataclass, field as dc_field, replace
 from difflib import SequenceMatcher
 from typing import Any, Iterable
 
-from .models import GEOMETRIC, HUMAN_APPROVED, TRUST_RANK, Document, Field
+from .models import (GEOMETRIC, HUMAN_APPROVED, TRUST_RANK, Document, Field,
+                     FormAnchor)
 from .normalize import normalize, statement_key
 
 # --- tiers -----------------------------------------------------------------
@@ -151,6 +152,15 @@ class PrefillIndex:
         # domain-header annotations, so its own domain is always empty - without
         # this, DOMAIN_PATTERN could never fire on the one input that needs it.
         self.form_domains: dict[str, Counter] = defaultdict(Counter)
+        # Markup that belongs to a form rather than to any of its fields: the
+        # domain headers at the top of a page and the constants drawn beside
+        # them. Keyed on the form, ordered by where it was drawn, exactly as
+        # `key_sets` is - the same set-of-statements idea, one level up.
+        self.form_sets: dict[str, dict[str, Candidate]] = defaultdict(dict)
+        # domain -> the header text a study writes for it ("DS" -> "DS=Disposition").
+        # Learned, not a built-in CDISC table: a sponsor that writes
+        # "DS = Disposition" with spaces gets its own spacing back.
+        self.domain_headers: dict[str, Counter] = defaultdict(Counter)
         # (field_key, annotation) pairs a reviewer turned down. Suggesting one
         # again is worse than suggesting nothing: it burns the reviewer's trust
         # in every other row on the sheet.
@@ -174,6 +184,10 @@ class PrefillIndex:
         idx._seed_domains(kb.con.execute(
             "SELECT normalized_name, domain FROM forms WHERE domain IS NOT NULL"
             " AND domain != ''"))
+        idx._load_form_annotations(
+            dict(r) for r in kb.con.execute("SELECT * FROM form_annotations"))
+        idx._seed_rejections(kb.con.execute(
+            "SELECT form_key, annotation_text FROM rejected_form_suggestions"))
         return idx
 
     @classmethod
@@ -203,6 +217,15 @@ class PrefillIndex:
         idx = cls._build(rows)
         idx._seed_domains((f.normalized_name, f.domain)
                           for d in docs for f in d.forms if f.domain)
+        idx._load_form_annotations(
+            {"file_name": doc.path.rsplit("/", 1)[-1],
+             "form_name": a.form_name,
+             "normalized_name": normalize(a.form_name),
+             "domain": (doc.form(a.form_name).domain if doc.form(a.form_name) else ""),
+             "annotation_text": a.text, "annot_type": a.annot_type,
+             "variable": (a.parsed or {}).get("variable") or "",
+             "annotation_bbox": list(a.bbox.as_tuple()), "trust": GEOMETRIC}
+            for doc in docs for a in doc.form_annotations() if a.form_name)
         return idx
 
     @classmethod
@@ -257,6 +280,42 @@ class PrefillIndex:
                                            c.drawn_x, c.annotation_text))
             self.key_sets[key] = {statement_key(c.annotation_text): c for c in ranked}
             self.by_key[key] = ranked[0]
+
+    def _load_form_annotations(self, rows: Iterable[dict]) -> None:
+        """Index the markup a form carries in its own right.
+
+        Same shape as `key_sets` one level up: distinct statements per key, best
+        evidence per statement, then ordered by where they were drawn so the set
+        comes back in the order the last study read it in - which for a row of
+        domain headers across the top of a page is left to right.
+        """
+        for r in rows:
+            key = r["normalized_name"]
+            if not key or not (r.get("annotation_text") or "").strip():
+                continue
+            trust = r.get("trust") or GEOMETRIC
+            statement = statement_key(r["annotation_text"])
+            prior = self.form_sets[key].get(statement)
+            score = 1.0 if trust == HUMAN_APPROVED else CONF_EXACT
+            if prior is None or _outranks(trust, score, prior):
+                approved = trust == HUMAN_APPROVED
+                self.form_sets[key][statement] = Candidate(
+                    tier=EXACT_KEY,
+                    confidence=CONF_APPROVED if approved else CONF_EXACT,
+                    variable=r.get("variable") or "",
+                    annotation_text=r["annotation_text"],
+                    annot_type=r.get("annot_type") or "", trust=trust,
+                    drawn_x=_left_edge(r.get("annotation_bbox")),
+                    source=f"{r.get('file_name', '')} · {r.get('form_name', '')}",
+                    evidence=[f"form-level markup on {r.get('form_name')!r} in "
+                              f"{r.get('file_name')}"])
+            if r.get("annot_type") == "DOMAIN_HEADER" and r.get("domain"):
+                self.domain_headers[str(r["domain"]).upper()][r["annotation_text"]] += 1
+        for key, statements in self.form_sets.items():
+            ranked = sorted(statements.values(),
+                            key=lambda c: (-TRUST_RANK.get(c.trust, 1), -c.confidence,
+                                           c.drawn_x, c.annotation_text))
+            self.form_sets[key] = {statement_key(c.annotation_text): c for c in ranked}
 
     def _seed_rejections(self, pairs) -> None:
         for key, annotation in pairs:
@@ -329,6 +388,57 @@ class PrefillIndex:
                 c.evidence.append("a reviewer rejected this suggestion previously")
             kept.append(c)
         return kept
+
+    def match_form(self, anchor: FormAnchor, domain: str = "") -> Prefill:
+        """What markup this form carries in its own right, as a set of rows.
+
+        Three outcomes, and the third is the one that matters most:
+
+        * the form was annotated before - return the whole set it carried, in
+          the order it was drawn, one row each.
+        * the form is new but its domain is known - propose the domain header
+          alone, in whatever wording the corpus writes it in. One row, and it is
+          a suggestion, not an answer: a page carrying a second domain's markup
+          is common and no amount of history about *this* form can predict it.
+        * nothing at all - one NEEDS_MAPPING row. This is the fix. Previously
+          the form-level layer was silently absent from the sheet, so nobody was
+          ever asked about it and the annotated PDF came out missing its headers.
+        """
+        key = normalize(anchor.form_name)
+        form_key = f"form|{key}"
+        seen = [_fresh(c) for c in self.form_sets.get(key, {}).values()]
+        seen = [c for c in self._drop_rejected(form_key, seen) if c.confidence > 0]
+        if seen:
+            return Prefill(field_id=anchor.id, form_name=anchor.form_name,
+                           field_text=anchor.text, best=seen[0],
+                           companions=seen[1:MAX_ANNOTATIONS_PER_FIELD])
+
+        proposed = self._domain_header(domain or anchor.domain, form_key)
+        best = proposed or Candidate(
+            tier=NEEDS_MAPPING, confidence=0.0,
+            annot_type="DOMAIN_HEADER",
+            evidence=["no form-level markup in the corpus for this form, and no "
+                      "domain to propose a header from - name the form's "
+                      "domain(s) here"])
+        return Prefill(field_id=anchor.id, form_name=anchor.form_name,
+                       field_text=anchor.text, best=best)
+
+    def _domain_header(self, domain: str, form_key: str) -> Candidate | None:
+        """The header text this corpus writes for a domain, if it writes one."""
+        if not domain:
+            return None
+        wordings = self.domain_headers.get(domain.upper())
+        text = (wordings.most_common(1)[0][0] if wordings else f"{domain.upper()}=")
+        if not wordings:
+            return None          # never invent a domain label we have not seen
+        candidate = Candidate(
+            tier=DOMAIN_PATTERN, confidence=0.7, annotation_text=text,
+            annot_type="DOMAIN_HEADER", source=f"corpus header wording for {domain}",
+            evidence=[f"this form is {domain}; the corpus writes its header as "
+                      f"{text!r}", "a page may carry a second domain's markup - "
+                      "add a row for each"])
+        kept = self._drop_rejected(form_key, [candidate])[0]
+        return kept if kept.confidence > 0 else None
 
     def domain_for(self, form_name: str) -> str:
         """The domain history assigns this form, when the document cannot say."""
@@ -492,12 +602,26 @@ def prefill_document(doc: Document, index: PrefillIndex) -> list[Prefill]:
     """Pre-fill every field of a blank CRF against the corpus."""
     out = []
     for page in doc.pages:
-        form = doc.form(page.form_name)
-        own = (form.domain if form else "") or page.form_domain
-        domain = own or index.domain_for(page.form_name)
         for fld in page.fields:
-            out.append(index.match(fld, domain=domain))
+            out.append(index.match(fld, domain=page_domain(doc, page, index)))
     return out
+
+
+def prefill_forms(doc: Document, index: PrefillIndex) -> list[Prefill]:
+    """Pre-fill the form-level layer: one result per page that belongs to a form."""
+    return [index.match_form(page.anchor, domain=page_domain(doc, page, index))
+            for page in doc.pages if page.anchor is not None]
+
+
+def page_domain(doc: Document, page, index: PrefillIndex) -> str:
+    """This page's SDTM domain: what the document says, else what history says.
+
+    A *blank* CRF carries no domain headers, so its own answer is empty on every
+    page - which is exactly the input that needs the corpus most.
+    """
+    form = doc.form(page.form_name)
+    own = (form.domain if form else "") or page.form_domain
+    return own or index.domain_for(page.form_name)
 
 
 def summarize_prefill(results: list[Prefill]) -> dict[str, Any]:

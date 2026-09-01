@@ -12,7 +12,7 @@ from typing import Any
 
 import pymupdf
 
-from . import annotations as annots
+from . import anchors, annotations as annots
 from . import fields as flds
 from . import forms, layout, linking
 from .models import (Annotation, BBox, Control, Document, Page, Rule, TextBlock,
@@ -67,6 +67,7 @@ class ACRFParser:
             flds.extract_fields(pages)                        # Phase 3
             annots.extract_annotations(pages)                 # Phases 4-5
             linking.link_document(self.document)              # Phase 6
+            anchors.resolve_form_level(self.document)         # Phase 6b
         return self.document
 
     # ---- per-page work ----------------------------------------------------

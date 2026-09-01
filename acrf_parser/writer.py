@@ -53,7 +53,7 @@ from typing import Any, Iterable
 import pymupdf
 
 from .importer import ImportedRow
-from .models import BBox
+from .models import BBox, FIELD_SCOPE, FORM_SCOPE
 from .normalize import statement_key
 from .template import ABOVE, BELOW, LEFT_OF, OVERLAPS, RIGHT_OF
 
@@ -106,6 +106,7 @@ class Placement:
     rect: BBox
     adjustments: list[str] = dc_field(default_factory=list)
     annot_seq: int = 1
+    scope: str = FIELD_SCOPE
 
     @property
     def key(self) -> tuple[str, int]:
@@ -131,14 +132,23 @@ class WriteReport:
     def multi_annotation_fields(self) -> dict[str, int]:
         counts: dict[str, int] = {}
         for p in self.placements:
+            if p.scope == FORM_SCOPE:
+                continue
             counts[p.row_id] = counts.get(p.row_id, 0) + 1
         return {k: v for k, v in sorted(counts.items()) if v > 1}
+
+    @property
+    def form_placements(self) -> list[Placement]:
+        """Form-level markup that reached the page - the header row of a form."""
+        return [p for p in self.placements if p.scope == FORM_SCOPE]
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "path": self.path,
             "written": len(self.placements),
-            "fields": len({p.row_id for p in self.placements}),
+            "fields": len({p.row_id for p in self.placements if p.scope != FORM_SCOPE}),
+            "form_annotations": len(self.form_placements),
+            "pages_with_form_markup": len({p.page for p in self.form_placements}),
             "multi_annotation_fields": len(self.multi_annotation_fields),
             "skipped": len(self.skipped),
             "adjusted": len(self.adjusted),
@@ -242,14 +252,19 @@ def _dedupe(rows: list[ImportedRow]) -> tuple[list[ImportedRow], list[tuple[str,
     """
     kept: list[ImportedRow] = []
     dropped: list[tuple[str, str]] = []
-    seen: dict[tuple[int, tuple[str, ...]], list[tuple[str, BBox]]] = {}
+    seen: dict[tuple[int, str, tuple[str, ...]], list[tuple[str, BBox]]] = {}
     for row in rows:
         key = statement_key(row.text_to_draw)
         box = _row_box(row)
         if not key or box is None:       # nothing to compare on; never guess
             kept.append(row)
             continue
-        page_key = (_page_of(row), key)
+        # Scoped, so a form-level statement is never compared with a field one.
+        # The anchor's band sits near the top of the page and a first field can
+        # fall inside `DUP_ROW_TOL` of it, which would let a page header and a
+        # question's markup cancel each other out - two different claims that
+        # happen to read the same.
+        page_key = (_page_of(row), row.scope, key)
         prior = next((label for rid, label, b in seen.get(page_key, [])
                       if rid != row.row_id and _same_row(box, b)), None)
         if prior:
@@ -298,7 +313,8 @@ def _place(row: ImportedRow, page: pymupdf.Page, taken: list[BBox],
     rect, moved = _fit(anchor, taken, obstacles, w, h, box_w)
     adjustments += moved
     return Placement(row_id=row.row_id, annot_seq=row.annot_seq, page=_page_of(row),
-                     text=row.text_to_draw, rect=rect, adjustments=adjustments)
+                     text=row.text_to_draw, rect=rect, adjustments=adjustments,
+                     scope=row.scope)
 
 
 def _after_sibling(anchor: BBox, prior: BBox, placement: str,

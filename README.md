@@ -69,16 +69,17 @@ for m in apply_template(template, parse_pdf("blank_crf.pdf")):
 
 | Path | Purpose |
 |---|---|
-| [acrf_parser/models.py](acrf_parser/models.py) | `BBox`, `Word`, `TextLine`, `TextGroup`, `Annotation`, `Rule`, `Control`, `Page`, `Document` |
+| [acrf_parser/models.py](acrf_parser/models.py) | `BBox`, `Word`, `TextLine`, `TextGroup`, `Annotation`, `Rule`, `Control`, `Field`, `FormAnchor`, `Page`, `Document` |
 | [acrf_parser/extract.py](acrf_parser/extract.py) | **Phase 1** — `ACRFParser.parse_pdf()` |
 | [acrf_parser/layout.py](acrf_parser/layout.py) | layout pass — regions, columns, wrapped-line grouping, roles |
 | [acrf_parser/forms.py](acrf_parser/forms.py) | **Phase 2** — form identity, continuation pages, cross references |
 | [acrf_parser/fields.py](acrf_parser/fields.py) | **Phase 3** — `Field` records, label cleanup, options, controls |
 | [acrf_parser/annotations.py](acrf_parser/annotations.py) | **Phases 4–5** — statement splitting and classification |
 | [acrf_parser/linking.py](acrf_parser/linking.py) | **Phase 6** — scored, row-aware field↔annotation links |
+| [acrf_parser/anchors.py](acrf_parser/anchors.py) | **Phase 6b** — form-level markup, and the per-page anchor it is written back to |
 | [acrf_parser/kb.py](acrf_parser/kb.py) | **Phase 7** — SQLite knowledge base |
 | [acrf_parser/template.py](acrf_parser/template.py) | **Phase 8** — template creation and application |
-| [acrf_parser/style.py](acrf_parser/style.py) | house style — text colour, box fill, font and placement conventions measured from a corpus |
+| [acrf_parser/style.py](acrf_parser/style.py) | house style — text colour, font and placement per annotation type, box fill per SDTM domain, measured from a corpus |
 | [acrf_parser/prefill.py](acrf_parser/prefill.py) | deterministic pre-fill — five scored tiers, offline, no model |
 | [acrf_parser/staging.py](acrf_parser/staging.py) | **Phase 9a/b** — the staging workbook |
 | [acrf_parser/importer.py](acrf_parser/importer.py) | **Phase 9c** — reading the workbook back, validated per row |
@@ -96,11 +97,12 @@ for m in apply_template(template, parse_pdf("blank_crf.pdf")):
 - [x] **4 — Annotation extraction.** Ids, form association, multi-statement splitting.
 - [x] **5 — Annotation classification.** DOMAIN_HEADER, VARIABLE, CONSTANT_ASSIGNMENT, SUPP_QUALIFIER, NOT_SUBMITTED, CROSS_REFERENCE, DERIVATION_RULE, NOTE.
 - [x] **6 — Field↔annotation linking.** `link_score`, row-aware, never pure nearest-neighbour.
+- [x] **6b — Form-level markup.** Domain headers and form-level constants, which belong to no field: recognised by type and by sitting above the page's first field, and given a per-page anchor so they can be staged, reviewed, drawn and learned like anything else.
 - [x] **7 — Knowledge base.** SQLite: forms, fields, annotations, links.
 - [x] **8 — Template creation.** Coordinate-free templates, and applying one to a blank CRF.
-- [x] **House style.** `/DA` appearance capture, and colour/font/placement conventions derived from a corpus.
+- [x] **House style.** `/DA` appearance capture, and colour/font/placement conventions derived from a corpus. Fill is measured per SDTM domain as well as per type — a study that draws `DSTERM` yellow and `RFICDTC` blue is colour-coding by domain, which type alone cannot express — and is left blank and flagged rather than defaulted where a statement's domain cannot be read off its text.
 - [x] **9a — Deterministic pre-fill.** Five scored tiers against the corpus, offline.
-- [x] **9b — Staging XLSX export.** Work sheet, locked geometry, house style, instructions.
+- [x] **9b — Staging XLSX export.** Work sheet (one row per annotation, field-level and form-level), locked geometry, house style, domain fill palette, instructions.
 - [x] **9c — Staging XLSX import.** Per-row validation, review copy written back.
 - [x] **10 — PDF annotation writing.** Approved rows drawn, clamped, de-collided, re-readable.
 - [x] **11 — The return edge.** Approved rows fed back, with trust and rejections.

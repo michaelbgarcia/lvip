@@ -52,9 +52,10 @@ from typing import Any
 from openpyxl import load_workbook
 
 from . import annotations as ann
-from .models import Document
+from .models import FIELD_SCOPE, FORM_SCOPE, Document
 from .normalize import normalize, statement_key
-from .staging import ANNOT_TYPES, SHEET_FORMS, SHEET_GEOM, SHEET_WORK, STATUSES
+from .staging import (ANNOT_TYPES, SCOPES, SHEET_FORMS, SHEET_GEOM, SHEET_WORK,
+                      STATUSES)
 from .template import ABOVE, BELOW, LEFT_OF, OVERLAPS, RIGHT_OF
 
 ERROR, WARNING = "ERROR", "WARNING"
@@ -85,6 +86,10 @@ class ImportedRow:
     """One reviewed annotation, ready for the PDF writer if it passed."""
     row_id: str
     annot_seq: int = 1
+    # FIELD | FORM. A FORM row's `row_id` names a page's header band rather than
+    # a question, so it is validated against the anchors instead of the fields -
+    # everything after that (geometry, placement, drawing) is identical.
+    scope: str = FIELD_SCOPE
     form_name: str = ""
     field_text: str = ""
     status: str = ""
@@ -176,11 +181,17 @@ class ImportReport:
             counts[r.row_id] = counts.get(r.row_id, 0) + 1
         return {k: v for k, v in sorted(counts.items()) if v > 1}
 
+    def form_rows(self) -> list[ImportedRow]:
+        """Rows that annotate a form rather than one of its fields."""
+        return [r for r in self.rows if r.scope == FORM_SCOPE]
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "path": self.path,
             "rows": len(self.rows),
-            "fields": len({r.row_id for r in self.rows}),
+            "fields": len({r.row_id for r in self.rows if r.scope != FORM_SCOPE}),
+            "form_rows": len(self.form_rows()),
+            "form_rows_approved": len([r for r in self.form_rows() if r.ready]),
             "multi_annotation_fields": len(self.multi_annotation_fields()),
             "approved": len(self.approved()),
             "blocked": len(self.blocked()),
@@ -214,7 +225,13 @@ def read_staging(path: str | Path, doc: Document | None = None) -> ImportReport:
 
     seen: set[tuple[str, int]] = set()
     used_seqs: dict[str, set[int]] = {}
+    # Fields and anchors together: both are things a row_id may name, and both
+    # must still exist in the CRF for the row to be placeable. Kept in one dict
+    # because every check downstream asks the same question of them - does this
+    # id exist, and does the row still describe what it points at.
     fields = {f.id: f for f in doc.iter_fields()} if doc else {}
+    if doc:
+        fields.update({a.id: a for a in doc.iter_anchors()})
     # Field carries its form's *name*; the domain lives on the Form - and for a
     # blank CRF it is only knowable from history, which the exporter recorded on
     # the Forms sheet. Prefer that, falling back to the document's own.
@@ -229,7 +246,14 @@ def read_staging(path: str | Path, doc: Document | None = None) -> ImportReport:
 
     _check_sets(report)
     if doc:
-        for missing in sorted(set(fields) - {rid for rid, _ in seen}):
+        # Fields only. A field with no rows is a field nobody was asked about,
+        # which is an error - but a page carrying no form-level markup is
+        # ordinary (a continuation page usually repeats no header), so an anchor
+        # with no rows is a legitimate answer, not a lost one. The way to record
+        # "this page needs none" and have the corpus learn it is still to REJECT
+        # the row rather than delete it.
+        wanted = {f.id for f in doc.iter_fields()}
+        for missing in sorted(wanted - {rid for rid, _ in seen}):
             report.issues.append(Issue(
                 missing, "row_id", ERROR, "MISSING_ROW",
                 f"field {missing} ({fields[missing].text!r}) has no row at all - "
@@ -278,6 +302,7 @@ def _row(raw: dict, formulas: dict, geometry: dict, fields: dict, domains: dict,
     add = lambda col, sev, code, msg: r.issues.append(Issue(row_id, col, sev, code, msg))
 
     _check_seq(r, raw, used_seqs, add)
+    _check_scope(r, raw, fields, add)
     _check_identity(r, raw, fields, seen, add)
     _check_formulas(r, raw, formulas, add)
     _check_status(r, raw, add)
@@ -318,6 +343,31 @@ def _check_seq(r, raw, used_seqs: dict[str, set[int]], add) -> None:
         return
     r.annot_seq = seq
     taken.add(seq)
+
+
+def _check_scope(r, raw, fields, add) -> None:
+    """Does this row belong to a field or to the form itself?
+
+    The `row_id` is the authority, not the column: it is the thing that resolves
+    to a position on the page, and a reviewer who copies a form row onto a field
+    row (or the reverse) has changed what the row *is* without meaning to. So a
+    disagreement is corrected from the id and reported, rather than believed -
+    believing the column would place a domain header on some question's row.
+    """
+    from .models import FormAnchor
+    written = _text(raw.get("scope")).upper()
+    target = fields.get(r.row_id)
+    actual = (FORM_SCOPE if isinstance(target, FormAnchor)
+              else FIELD_SCOPE if target is not None
+              else written or FIELD_SCOPE)
+    if written and written not in SCOPES:
+        add("scope", ERROR, "BAD_SCOPE",
+            f"{written!r} is not one of {', '.join(SCOPES)}")
+    elif written and target is not None and written != actual:
+        add("scope", WARNING, "SCOPE_MISMATCH",
+            f"row says {written} but {r.row_id} is a "
+            f"{'form header' if actual == FORM_SCOPE else 'field'}; treated as {actual}")
+    r.scope = actual
 
 
 def _check_identity(r, raw, fields, seen, add) -> None:
@@ -398,8 +448,10 @@ def _check_decision(r, raw, domains, add) -> None:
             f"{r.variable!r} is not an SDTM variable token")
 
     # Classify what was actually typed with the same rules the parser uses, so
-    # the workbook cannot declare a type its own text contradicts.
-    parsed = ann.classify(r.annotation_text)
+    # the workbook cannot declare a type its own text contradicts. A FORM row is
+    # page-topmost markup by construction, which is the signal that separates
+    # "DS=DISPOSITION" (a domain header) from "DS=COMPLETED" (a constant).
+    parsed = ann.classify(r.annotation_text, first=r.scope == FORM_SCOPE)
     if not r.annot_type:
         r.annot_type = parsed.annot_type
     elif r.annot_type not in ANNOT_TYPES:

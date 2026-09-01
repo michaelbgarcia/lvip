@@ -5,6 +5,7 @@ import argparse
 import json
 from pathlib import Path
 
+from .anchors import summarize_form_level
 from .extract import ACRFParser, dump_json, summarize
 from .importer import read_staging, write_review_copy
 from .writer import write_annotations
@@ -59,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.quiet:
         print(json.dumps(summarize(doc), indent=2))
+        print(json.dumps(summarize_form_level(doc), indent=2))
         if template:
             print(json.dumps(summarize_template(template), indent=2))
         if staged:

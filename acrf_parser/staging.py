@@ -42,16 +42,19 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
 from . import prefill as pf
-from .models import Document
-from .prefill import PrefillIndex, prefill_document
+from .models import FIELD_SCOPE, FORM_SCOPE, Document
+from .prefill import PrefillIndex, prefill_document, prefill_forms
 from .style import HouseStyle, derive_house_style
+from .template import RIGHT_OF
 
 SHEET_WORK, SHEET_GEOM = "Annotations", "Geometry"
 SHEET_STYLE, SHEET_FORMS, SHEET_README = "HouseStyle", "Forms", "Instructions"
+SHEET_FILLS = "DomainFills"
 
 STATUSES = ["AUTO", "NEEDS_REVIEW", "NEEDS_MAPPING", "APPROVED", "REJECTED"]
 ANNOT_TYPES = ["VARIABLE", "CONSTANT_ASSIGNMENT", "SUPP_QUALIFIER", "NOT_SUBMITTED",
                "DERIVATION_RULE", "CROSS_REFERENCE", "DOMAIN_HEADER", "NOTE"]
+SCOPES = [FIELD_SCOPE, FORM_SCOPE]
 
 # Columns the human and the agent fill in. Everything else is evidence or is locked.
 #
@@ -71,15 +74,16 @@ EDITABLE = ("annot_seq", "form_name", "final_variable", "final_annotation",
             "font_name", "font_size", "placement")
 
 HEADERS = [
-    ("row_id", 10), ("annot_seq", 10), ("form_name", 22), ("page", 6), ("field_text", 42),
+    ("row_id", 10), ("annot_seq", 10), ("scope", 8), ("form_name", 22), ("page", 6),
+    ("field_text", 42),
     ("item_number", 11), ("options", 26), ("control", 9),
     ("suggested_variable", 18), ("suggested_annotation", 26), ("suggested_annot_type", 20),
     ("match_tier", 22), ("match_score", 11), ("match_source", 38), ("match_reason", 52),
     ("known_aliases", 26),
     ("final_variable", 16), ("final_annotation", 26), ("final_annot_type", 18),
     ("status", 15), ("reviewer_note", 30),
-    ("color_rgb", 14), ("fill_rgb", 12), ("font_name", 11), ("font_size", 10),
-    ("placement", 17),
+    ("color_rgb", 14), ("fill_rgb", 12), ("fill_basis", 46), ("font_name", 11),
+    ("font_size", 10), ("placement", 17),
 ]
 
 FILL_AUTO = PatternFill("solid", fgColor="E8F5E9")      # settled: nothing to do
@@ -113,15 +117,28 @@ def build_staging(doc: Document, index: PrefillIndex | None = None,
     a field history has nothing for still gets its NEEDS_MAPPING row, because a
     field with no row is a field nobody is asked about.
 
+    The same reasoning is what puts the **form-level** rows here. A page's domain
+    headers and form-level constants belong to no field, so before there was a
+    scope column there was no row they could occupy - and a layer with no rows is
+    a layer nobody is asked about, which is precisely why annotated CRFs came out
+    of this pipeline missing the markup across the top of every page. Each page
+    that belongs to a form now leads with its own rows, in reading order: the
+    form's markup first, then the fields under it.
+
     With no index the sheet is still produced - every row simply arrives as
     NEEDS_MAPPING, which is the honest state of a first study with no history.
     """
     index = index or PrefillIndex()
     house = house or derive_house_style([])
     results = {r.field_id: r for r in prefill_document(doc, index)}
+    form_results = {r.field_id: r for r in prefill_forms(doc, index)}
 
     rows: list[StagingRow] = []
     for page in doc.pages:
+        if page.anchor is not None:
+            r = form_results.get(page.anchor.id)
+            for seq, candidate in enumerate(r.annotations if r else [None], start=1):
+                rows.append(_form_row(page, page.anchor, r, candidate, seq, house))
         for fld in page.fields:
             r = results.get(fld.id)
             candidates = r.annotations if r else [None]
@@ -130,41 +147,99 @@ def build_staging(doc: Document, index: PrefillIndex | None = None,
     return rows
 
 
+def _form_row(page, anchor, result, best, seq: int, house: HouseStyle) -> StagingRow:
+    """One form-level annotation, anchored to the page's header band.
+
+    Placement and offsets are fixed rather than taken from the house style. The
+    house style's placement is measured from *field* markup - "12pt right of the
+    label" - and an anchor is not a label: it is the point the row of headers
+    starts at, so the first annotation sits on it and the rest chain rightwards
+    off each other exactly as they are drawn.
+    """
+    status = (result.status_of(best) if result and best else pf.NEEDS_MAPPING_STATUS)
+    rule, basis = _rule_for(house, best)
+    return StagingRow(
+        row_id=anchor.id,
+        annot_seq=seq,
+        values={
+            "row_id": anchor.id,
+            "annot_seq": seq,
+            "scope": FORM_SCOPE,
+            "form_name": anchor.form_name,
+            "page": anchor.page,
+            "field_text": anchor.text,
+            "item_number": "", "options": "", "control": "",
+            **_suggestion_values(result, best, status),
+            "color_rgb": _hex(rule.text_color),
+            "fill_rgb": _hex(rule.fill_color),
+            "fill_basis": basis,
+            "font_name": rule.font_name,
+            "font_size": rule.font_size or "",
+            "placement": RIGHT_OF,
+        },
+        geometry={
+            "row_id": anchor.id, "annot_seq": seq, "page": anchor.page,
+            "page_width": page.width, "page_height": page.height,
+            **anchor.bbox.relative(page.width, page.height),
+            "offset_x_pct": 0.0, "offset_y_pct": 0.0,
+            "group_id": "", "field_confidence": "",
+        },
+    )
+
+
+def _rule_for(house: HouseStyle, best) -> tuple[Any, str]:
+    """Style for one proposed annotation, plus where its fill came from."""
+    annot_type = best.annot_type if best and best.annot_type else "VARIABLE"
+    text = best.annotation_text if best else ""
+    return house.for_annotation(annot_type, text)
+
+
+def _suggestion_values(result, best, status: str) -> dict[str, Any]:
+    """The evidence and decision columns, shared by field and form rows."""
+    return {
+        "suggested_variable": best.variable if best else "",
+        "suggested_annotation": best.annotation_text if best else "",
+        "suggested_annot_type": best.annot_type if best else "",
+        "match_tier": best.tier if best else pf.NEEDS_MAPPING,
+        "match_score": round(best.confidence, 3) if best else 0.0,
+        "match_source": best.source if best else "",
+        "match_reason": "; ".join(best.evidence) if best else "",
+        "known_aliases": ", ".join(result.aliases) if result else "",
+        # An AUTO row is pre-accepted; anything else is left blank on purpose,
+        # so a reviewer cannot mistake a suggestion for a decision.
+        "final_variable": best.variable if status == pf.AUTO else "",
+        "final_annotation": best.annotation_text if status == pf.AUTO else "",
+        "final_annot_type": best.annot_type if status == pf.AUTO else "",
+        "status": status,
+        "reviewer_note": "",
+    }
+
+
 def _row(doc, page, fld, result, best, seq: int, house: HouseStyle) -> StagingRow:
     status = (result.status_of(best) if result and best
               else pf.NEEDS_MAPPING_STATUS)
-    rule = house.for_type(best.annot_type if best and best.annot_type else "VARIABLE")
+    rule, basis = _rule_for(house, best)
     return StagingRow(
         row_id=fld.id,
         annot_seq=seq,
         values={
             "row_id": fld.id,
             "annot_seq": seq,
+            "scope": FIELD_SCOPE,
             "form_name": fld.form_name,
             "page": fld.page,
             "field_text": fld.text,
             "item_number": fld.item_number,
             "options": " | ".join(fld.option_texts),
             "control": ",".join(fld.control_kinds),
-            "suggested_variable": best.variable if best else "",
-            "suggested_annotation": best.annotation_text if best else "",
-            "suggested_annot_type": best.annot_type if best else "",
-            "match_tier": best.tier if best else pf.NEEDS_MAPPING,
-            "match_score": round(best.confidence, 3) if best else 0.0,
-            "match_source": best.source if best else "",
-            "match_reason": "; ".join(best.evidence) if best else "",
-            "known_aliases": ", ".join(result.aliases) if result else "",
-            # An AUTO row is pre-accepted; anything else is left blank on purpose,
-            # so a reviewer cannot mistake a suggestion for a decision.
-            "final_variable": best.variable if status == pf.AUTO else "",
-            "final_annotation": best.annotation_text if status == pf.AUTO else "",
-            "final_annot_type": best.annot_type if status == pf.AUTO else "",
-            "status": status,
-            "reviewer_note": "",
+            **_suggestion_values(result, best, status),
             "color_rgb": _hex(rule.text_color),
             # Blank when the corpus draws no background: an unfilled box is a
-            # real house style, not a missing value to be invented.
+            # real house style, not a missing value to be invented. Blank *also*
+            # where the corpus colour-codes by domain and this statement's domain
+            # could not be resolved - `fill_basis` says which of the two it is.
             "fill_rgb": _hex(rule.fill_color),
+            "fill_basis": basis,
             "font_name": rule.font_name,
             "font_size": rule.font_size or "",
             "placement": rule.placement,
@@ -196,6 +271,7 @@ def write_staging(doc: Document, path: str | Path, index: PrefillIndex | None = 
     _work_sheet(wb, rows)
     _geometry_sheet(wb, rows)
     _style_sheet(wb, house)
+    _fills_sheet(wb, house)
     _forms_sheet(wb, doc, index or PrefillIndex())
     _readme_sheet(wb, doc, rows)
     wb.remove(wb["Sheet"]) if "Sheet" in wb.sheetnames else None
@@ -234,6 +310,7 @@ def _work_sheet(wb: Workbook, rows: list[StagingRow]) -> None:
 
     _validate(ws, names, "status", STATUSES, len(rows))
     _validate(ws, names, "final_annot_type", ANNOT_TYPES, len(rows))
+    _validate(ws, names, "scope", SCOPES, len(rows))
     for idx, (_, width) in enumerate(HEADERS, start=1):
         ws.column_dimensions[get_column_letter(idx)].width = width
     ws.freeze_panes = "D2"
@@ -299,6 +376,41 @@ def _style_sheet(wb: Workbook, house: HouseStyle) -> None:
     ws.freeze_panes = "A2"
 
 
+def _fills_sheet(wb: Workbook, house: HouseStyle) -> None:
+    """The study's fill palette: which colour goes with which domain.
+
+    Its own sheet because "which domain is which colour?" is a question a
+    reviewer asks as a whole, and the answer is unreadable spread across a
+    thousand rows of the work sheet. Statement rows are the exceptions: markup
+    whose domain cannot be read off the text (DM's own variables carry no
+    prefix), listed with the fill the corpus actually drew it in.
+    """
+    ws = wb.create_sheet(SHEET_FILLS)
+    ws.append(["scope", "fill_rgb", "fill_agreement", "fill_samples", "samples",
+               "text_color", "evidence"])
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = FILL_HEADER
+    note = ("fill varies by domain in this corpus - a row whose domain cannot be "
+            "resolved is left blank for you to decide"
+            if house.fill_varies_by_domain else
+            "fill does not vary by domain in this corpus - every row takes the "
+            "house style fill and this sheet is reference only")
+    for rule in house.fill_rules():
+        ws.append([rule.scope, _hex(rule.fill_color), rule.fill_agreement,
+                   rule.fill_samples, rule.samples, _hex(rule.text_color),
+                   "; ".join(rule.evidence)])
+        if rule.fill_samples and rule.fill_agreement < 0.7:
+            for cell in ws[ws.max_row]:
+                cell.fill = FILL_REVIEW
+    ws.append([])
+    ws.append([note])
+    ws.cell(row=ws.max_row, column=1).font = Font(bold=True)
+    for i, w in enumerate([34, 11, 15, 13, 9, 12, 70], start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.freeze_panes = "A2"
+
+
 def _forms_sheet(wb: Workbook, doc: Document, index: PrefillIndex) -> None:
     """Form inventory, with the domain resolved.
 
@@ -343,6 +455,14 @@ def _readme_sheet(wb: Workbook, doc: Document, rows: list[StagingRow]) -> None:
         ("1. Work the 'Annotations' sheet. One row per ANNOTATION, not per field:", False),
         ("   a field with four annotations has four rows, sharing one row_id and", False),
         ("   numbered 1, 2, 3, 4 in annot_seq.", False),
+        ("1b. Rows where scope = FORM are the markup across the TOP of a page -", False),
+        ("   the domain header(s) and any form-level constants. They belong to the", False),
+        ("   form, not to a question, so field_text reads '[form header] <form>'.", False),
+        ("   A page usually carries more than one: two domain headers side by side", False),
+        ("   (DS=Disposition, DM=Demographics) plus constants such as", False),
+        ("   'DSCAT = PROTOCOL MILESTONE'. Add a row per statement, same way as", False),
+        ("   for a field: copy the row and bump annot_seq. They are drawn left to", False),
+        ("   right across the header band in annot_seq order.", False),
         ("2. Rows are pre-filled from previously annotated studies where the", False),
         ("   (form_name, field_text) pair was seen before. Those arrive as AUTO", False),
         ("   with final_variable already set - confirm, do not retype.", False),
@@ -380,6 +500,12 @@ def _readme_sheet(wb: Workbook, doc: Document, rows: list[StagingRow]) -> None:
         ("  previous studies. Change them only for a deliberate exception.", False),
         ("- See the 'HouseStyle' sheet for rules marked settled=NO. Those are cases", False),
         ("  where past studies disagreed and someone needs to decide once.", False),
+        ("- fill_rgb may be blank for two different reasons, and fill_basis says", False),
+        ("  which: either the study draws unfilled boxes, or the study colour-codes", False),
+        ("  by domain and this statement's domain could not be read off its text.", False),
+        ("  The second needs a decision - see the 'DomainFills' sheet for the", False),
+        ("  palette and put the right colour in. DM's own variables are the usual", False),
+        ("  case: nothing in 'RFICDTC' says DM, so it cannot be resolved for you.", False),
         ("", False),
         ("Status of this workbook", True),
     ]
@@ -403,8 +529,16 @@ def summarize_staging(rows: list[StagingRow]) -> dict[str, Any]:
     per_field: dict[str, int] = {}
     for r in rows:
         per_field[r.row_id] = per_field.get(r.row_id, 0) + 1
-    return {"rows": len(rows), "fields": len(per_field),
+    form_rows = [r for r in rows if r.values.get("scope") == FORM_SCOPE]
+    field_rows = [r for r in rows if r.values.get("scope") != FORM_SCOPE]
+    return {"rows": len(rows), "fields": len({r.row_id for r in field_rows}),
             "by_tier": dict(sorted(tiers.items())),
             "by_status": dict(sorted(statuses.items())),
             "auto_fill_rate": round(statuses.get("AUTO", 0) / total, 3),
-            "multi_annotation_fields": sum(1 for n in per_field.values() if n > 1)}
+            "form_rows": len(form_rows),
+            "forms_with_several": sum(
+                1 for rid in {r.row_id for r in form_rows} if per_field[rid] > 1),
+            "undecided_fills": sum(1 for r in rows if not r.values.get("fill_rgb")
+                                   and r.values.get("fill_basis")),
+            "multi_annotation_fields": len(
+                {r.row_id for r in field_rows if per_field[r.row_id] > 1})}
