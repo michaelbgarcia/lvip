@@ -16,12 +16,45 @@ python3 -m venv .venv
 ## Use
 
 ```bash
-# generate a synthetic test aCRF (5 pages, 17 annotations)
-.venv/bin/python tests/sample_pdf.py
+# parse a real aCRF: writes <stem>.extract.json + <stem>.template.json,
+# and a knowledge base
+.venv/bin/python -m acrf_parser data/blankcrf_annotated.pdf -o output --db output/kb.sqlite
 
-# parse: writes <stem>.extract.json + <stem>.template.json, and a knowledge base
-.venv/bin/python -m acrf_parser data/sample_acrf.pdf -o output --db output/kb.sqlite
+# score the whole pipeline against a real aCRF and its own blank
+.venv/bin/python scripts/score_msg.py -v
 ```
+
+## Calibration
+
+`data/` holds the CDISC SDTM Metadata Submission Guidelines example CRF twice:
+`blankcrf_annotated.pdf` with its 206 SDTM annotations and `blankcrf.pdf`
+without them. Same 22 pages either way, so the annotated one is a complete
+**answer key** for the blank one, and the whole loop can be scored end to end
+with no human labelling in it:
+
+```
+annotated CRF -> corpus -> stage the blank -> approve -> draw -> compare
+```
+
+| | before calibrating | now |
+|---|---|---|
+| statements reproduced (recall) | 0.379 | **1.000** |
+| drawn that the sponsor also drew (precision) | 0.459 | **0.986** |
+| median placement error | 174.5 pt | **0.0 pt** |
+| within 12 pt of the original | 5% | **94%** |
+| within 72 pt | 31% | **99%** |
+| text colour / font / size reproduced | 0.99 / 1.00 / 0.89 | **1.00 / 1.00 / 1.00** |
+
+`tests/msg.py` builds the answer key (with raw PyMuPDF, never through this
+parser - a key extracted by the code under test only proves the code agrees with
+itself), `tests/msg_pipeline.py` runs the loop, `tests/test_msg_fidelity.py`
+asserts floors just under the measured numbers, and `scripts/diagnose_msg.py`
+breaks a run down by scope, page and cause.
+
+The synthetic fixture in `tests/sample_pdf.py` is still used, for the cases this
+one real CRF has no example of: a study that colour-codes by SDTM domain, two
+studies that disagree about what "Start Date" means, a page named by nothing but
+its domain-header annotation.
 
 ```python
 from acrf_parser import parse_pdf
@@ -87,6 +120,10 @@ for m in apply_template(template, parse_pdf("blank_crf.pdf")):
 | [acrf_parser/normalize.py](acrf_parser/normalize.py) | shared text normalization |
 | [acrf_parser/cli.py](acrf_parser/cli.py) | `python -m acrf_parser` |
 | [tests/sample_pdf.py](tests/sample_pdf.py) | synthetic aCRF fixture generator |
+| [tests/msg.py](tests/msg.py) | the MSG answer key, and how a run is scored against it |
+| [tests/msg_pipeline.py](tests/msg_pipeline.py) | one end-to-end pass over the MSG pair |
+| [scripts/score_msg.py](scripts/score_msg.py) | the scorecard |
+| [scripts/diagnose_msg.py](scripts/diagnose_msg.py) | the same run, broken down by scope, page and cause |
 
 ## Phases
 
@@ -95,7 +132,7 @@ for m in apply_template(template, parse_pdf("blank_crf.pdf")):
 - [x] **2 — Form detection.** `Form`, continuation pages, `See Page X`.
 - [x] **3 — Field extraction.** Raw + normalized text, item numbering, options, controls.
 - [x] **4 — Annotation extraction.** Ids, form association, multi-statement splitting.
-- [x] **5 — Annotation classification.** DOMAIN_HEADER, VARIABLE, CONSTANT_ASSIGNMENT, SUPP_QUALIFIER, NOT_SUBMITTED, CROSS_REFERENCE, DERIVATION_RULE, NOTE.
+- [x] **5 — Annotation classification.** DOMAIN_HEADER, VARIABLE, CONSTANT_ASSIGNMENT, CONDITIONAL_VARIABLE, SUPP_QUALIFIER, NOT_SUBMITTED, CROSS_REFERENCE, DERIVATION_RULE, NOTE.
 - [x] **6 — Field↔annotation linking.** `link_score`, row-aware, never pure nearest-neighbour.
 - [x] **6b — Form-level markup.** Domain headers and form-level constants, which belong to no field: recognised by type and by sitting above the page's first field, and given a per-page anchor so they can be staged, reviewed, drawn and learned like anything else.
 - [x] **7 — Knowledge base.** SQLite: forms, fields, annotations, links.
@@ -188,12 +225,40 @@ Two traps this handles, both real:
 
 Every threshold is a named constant at the top of its module — `GAP_RATIO`,
 `GUTTER_MIN_PT`, `CONTROL_NEAR_PT` in [layout.py](acrf_parser/layout.py); the
-`CONF_*` ladder in [forms.py](acrf_parser/forms.py) and
-[annotations.py](acrf_parser/annotations.py); `W_ROW`, `ROW_SLACK_PT`,
-`MIN_LINK_SCORE` in [linking.py](acrf_parser/linking.py); `REL_TOL` in
-[template.py](acrf_parser/template.py). All of them are tuned against the
-synthetic fixture — recalibrate against a real study PDF before trusting new
-studies.
+`CONF_*` ladder and the title-scoring weights in
+[forms.py](acrf_parser/forms.py); `W_ROW`, `ROW_SLACK_PT`, `MIN_LINK_SCORE` in
+[linking.py](acrf_parser/linking.py); `MAX_LEARNED_OFFSET_*` in
+[staging.py](acrf_parser/staging.py); `MAX_MOVE_PT` in
+[writer.py](acrf_parser/writer.py); `REL_TOL` in
+[template.py](acrf_parser/template.py). They are calibrated against the MSG
+pair — see **Calibration** above — and `scripts/score_msg.py` is how you find
+out what moving one costs.
+
+**A page can be turned, and everything below Phase 1 is spared knowing it.**
+Three of the MSG CRF's 22 pages carry `/Rotate 90`. PyMuPDF reports two
+coordinate systems for such a page: `page.rect` is the landscape view a reader
+sees, while `get_text`, `annot.rect` and `get_drawings` all answer in the
+*unrotated* portrait space, where the rows run down the x axis. Every geometric
+test in this parser is about reading order — "same row" is vertical overlap,
+columns are cut on vertical whitespace, a wrapped line is the one below its
+predecessor — so on those pages each of them was asking about the wrong axis,
+which is why they yielded no fields at all. `extract.display_matrix` rotates
+once, at extraction; `writer` inverts it on the way out because
+`add_freetext_annot` wants page space back, and sets the annotation's own
+`/Rotate` so the glyphs are laid out in reading order rather than sideways.
+
+**A form title is scored, not taken from the top of the page.** It used to be
+the topmost bold heading, and on a real CRF that is almost never the form: every
+page of the MSG example opens with a bordered identification band — the study
+("CDISC Study CDISC01"), the visit, the assessment date — printed bold above and
+to the left of the form's own name. Taking the topmost heading named all 22
+pages after the study and collapsed the whole CRF into three forms, which
+destroys the `(form_name, field_text)` key everything downstream is built on.
+What actually separates "DEMOGRAPHY" from "CDISC Study CDISC01" is not height on
+the page but that a title is *centred*, *short*, *not printed on every other
+page*, and alone on its line — a table's header row is bold, short and centred
+too, one cell at a time. None is decisive alone, so `forms._title_score` scores
+them together and keeps the reasons as evidence.
 
 
 **A page's form comes from four signals, in order of how much they can be trusted.**
@@ -226,6 +291,32 @@ question must not claim the radio circles that belong to its options.
 variables to one field. Only a *pure* variable list splits: anything with prose,
 an `=`, brackets or a `when` clause stays whole, so
 `SUPPDS.QVAL when QNAM = "PROTVER"` survives intact.
+
+**`XXORRES when XXTESTCD = CODE` is a type, not prose.** Every SDTM findings
+domain is annotated this way, because a findings observation is not identified
+by its variable — `QSORRES` is *every* answer on a questionnaire — but by the
+variable plus the test code that says which question it is. On the MSG CRF that
+shape is seventy of two hundred and six annotations, a third of the file, and
+all seventy read as unclassified `NOTE`: no variable parsed, no domain resolved,
+so no fill colour, no domain check, and the least structured label in the
+taxonomy shown to the reviewer for the most structured thing on the page.
+`CONDITIONAL_VARIABLE` parses the variables, the condition variable and its
+values, and is checked after SUPP — `RACEOTH when SUPPDM.QNAM = RACEOTH` has the
+same shape and is the more specific case. It tolerates what annotators actually
+type: `QSORRESwhen QSTESTCD = CSDD19` and `QSORRES when QSTESTCD =CSDD04` are
+both in this file, and a parser that only reads tidy input reports a typo as
+prose.
+
+**Markup that reaches no field still gets a row.** It used to be dropped unless
+it sat above the page's first field, on the reasoning that anything unlinked
+among the fields "stays a finding". It did not stay a finding — it stayed
+nowhere: not in the workbook, not in the knowledge base, not on the output PDF,
+and not in front of the reviewer who was supposed to find it. On the MSG CRF
+that silently lost 35 of 206 annotations. It belongs to the form now, for the
+same reason the form-level layer exists at all, and *where* it sat is kept in
+the evidence instead: markup above the first field is the page's header band,
+and markup among them is markup the linker could not place. The second is worth
+a second look; neither is worth discarding.
 
 **Classification order is the whole trick.** `SUPPDS.QVAL when QNAM = "PROTVER"`
 contains an `=` and reads as a constant assignment unless SUPP is tested first.
@@ -443,10 +534,64 @@ from the text layer on re-parse, or the next study's field extraction would read
 our own markup back as CRF labels. `test_written_annotations_are_stripped_from_the_text_layer`
 exists for that.
 
-**Placement is arithmetic; what arithmetic cannot settle gets reported.** The
-workbook carries the field's box and the house style's offsets as page fractions,
-so a position is recovered by multiplying — no model, and identical output on
-every run. Two things it cannot decide alone:
+**Placement comes from the most specific evidence there is.** Three answers, in
+order:
+
+1. **The offset history recorded from this field.** Portable — it survives the
+   form being re-flowed — and it is a claim about this exact statement.
+2. **The page position history recorded**, where that offset is missing or
+   implausible. Less portable, but still where somebody put this statement
+   rather than an average of where they put statements like it. It is the *only*
+   evidence for form-level markup, which has no field to be offset from at all.
+3. **The house style**, the corpus median for annotations of this type — the
+   right answer for a statement nobody has seen, and a poor one for a statement
+   that was seen, on this form, on this field, in a spot someone chose.
+
+`anchor_source` on the Geometry sheet records which answered. Getting this order
+right is most of the difference between a median placement error of 174 points
+and one of zero: the house style alone put every page's domain headers in a band
+at the top left whatever the study actually did, which on the MSG Demography
+page is most of the page's height away from where two of the three belong.
+
+The recorded **width** matters as much as the position. Annotators set long
+markup in a narrow column beside the field, not across the page — "Reason for
+Discontinuation / 0 Ongoing / 1 Adverse Event / …" is six lines in 189 points —
+and drawn as one line that is over 600 points wide, will not fit anywhere, and
+the search abandons the position and clamps the box to the margin. So the box is
+wrapped to the width history recorded, and its height comes from the wrap rather
+than from history, so a reviewer who rewrites the text gets a taller box instead
+of a clipped one.
+
+A learned position also suspends the obstacle search. The form's own words are
+obstacles to a *computed* position, which is a guess about where there is room;
+a position a previous study actually drew and shipped is known to work on that
+page, and moving it to satisfy a word-overlap test costs fidelity to buy
+nothing. Other annotations still block, and the search that resolves that is
+bounded by `MAX_MOVE_PT` — an annotation nudged an inch is one a reviewer can
+still see belongs to its field, and one carried across the page has quietly
+become a claim about a different part of the form.
+
+**Appearance is measured per statement where it was measured at all.** Same
+order, same reason: the house style's per-type mode is right for a statement
+nobody has seen, and the MSG corpus sets domain headers at 18pt, most variables
+at 12pt and a run of questionnaire markup at 10pt. Since the box is measured
+from the text at that size, a wrong size is a wrong width and so a wrong
+position. Fill keeps the domain axis for unseen statements — that is what
+colour-coding by domain is for — but a statement the corpus drew wins for
+itself: 188 of the MSG CRF's 206 boxes are cyan, so the domain mode reports cyan
+for DS markup the sponsor drew yellow, on the very page the distinction exists
+to capture.
+
+**The appearance stream outranks `/DA`.** A FreeText annotation is supposed to
+declare its colour and font in `/DA`, and on a real aCRF it frequently lies:
+every annotation on the MSG CRF carries `0 0 0 rg /Arial,BoldItalic 12 Tf`, and
+every variable on it is drawn in red, because the appearance stream sets
+`1 0 0 rg` after `/DA` has had its say. The appearance stream is what a reader
+paints, so that is what is read — otherwise the corpus learns a house style of
+black text from a study that is not black, and the next aCRF comes out in a
+colour nobody used. The same precedence already governed the background fill.
+
+**Two things arithmetic cannot decide alone:**
 
 - **A box that runs off the page.** Long markup placed right of a label near the
   right margin will not fit. It is pulled back inside the page and the row
@@ -469,7 +614,17 @@ every run. Two things it cannot decide alone:
 
 Only `ImportedRow.ready` rows are drawn — validated *and* signed off, never one
 without the other. A font the PDF cannot embed is substituted for a base-14 face
-and the substitution is recorded rather than passed off as the real thing.
+and the substitution is recorded rather than passed off as the real thing — in
+`Placement.notes`, not `Placement.adjustments`, because it is not a placement
+problem and there is nothing on the page for a reviewer to check. A corpus set
+in a house font substitutes on every row, and reporting two hundred "adjusted"
+annotations when thirty actually moved is the same as reporting none.
+
+The face is then written into the appearance directly. PyMuPDF takes a
+`fontname` for an annotation and writes `/Helv` regardless, so a corpus set in
+bold italic came out in plain roman on every row — the first thing a reviewer
+notices about a page, and the difference between output that looks like the
+sponsor's work and output that looks like a draft.
 
 **Formatting conventions are measured, not inferred.** A FreeText annotation's
 colour and font are not in `/C` or `/IC` — `annot.colors` comes back empty for

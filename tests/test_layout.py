@@ -239,3 +239,22 @@ def test_merge_predicate_punctuation():
 def test_join_handles_hyphenation():
     assert layout._join(["Concomi-", "tant medication"]) == "Concomitant medication"
     assert layout._join(["Start", "Date"]) == "Start Date"
+
+
+# --- against the real MSG CRF ----------------------------------------------
+def test_a_tables_stacked_header_cells_are_merged(msg_run):
+    """One column band, several stacked labels side by side:
+
+        Number of          Date Tablets Returned     Number of Tablets
+        Tablets                                      Returned
+        Dispensed
+
+    Read in y-then-x order those arrive interleaved, so a scan that only ever
+    extends the group it is currently building meets "Date Tablets Returned"
+    between "Number of" and "Tablets" and closes it - and one label comes out as
+    three, each of which then keys separately.
+    """
+    texts = {g.text for g in msg_run.blank.page(19).groups}
+    assert "Number of Tablets Dispensed" in texts
+    assert "Number of Tablets Returned" in texts
+    assert "Number of" not in texts

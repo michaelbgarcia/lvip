@@ -19,12 +19,24 @@ inference beyond them:
 
 * the type. `DOMAIN_HEADER` is form-level by definition - Phase 2 already reads
   it to name the page's form, and Phase 6 already refuses to link it.
-* the position. Markup that reached no field *and* sits above the first field on
-  the page is form-level: a page's questions start below its header band, so
-  markup above all of them is not late-arriving field markup, it is the form's.
-  Anything unlinked *among* the fields stays unlinked and stays a finding -
-  usually a qualifier whose question is on another page, and guessing at it here
-  would bury exactly the case a reviewer needs to see.
+* reaching no field. Markup the linker could not place belongs to the form, for
+  the same reason the whole form-level layer exists: it has to belong to
+  *something* or it has no row, and a layer with no rows is a layer nobody is
+  ever asked about.
+
+  This used to be narrower - only markup above the page's first field counted,
+  on the reasoning that anything unlinked among the fields "stays a finding".
+  It did not stay a finding. It stayed nowhere: not in the workbook, not in the
+  knowledge base, not on the output PDF, and not in front of the reviewer who
+  was supposed to be finding it. On the MSG example CRF that silently lost 35 of
+  209 annotations - `IETEST`, `ETHNIC`, `RACE`, every `QSORRES when QSTESTCD =
+  ...` on the questionnaire pages - each of which is real markup somebody wrote
+  and nobody would ever have been shown.
+
+  Where the markup sat is kept in the evidence instead, because the two cases
+  read differently to a reviewer: markup above the first field is the page's
+  header band, and markup among the fields is markup the linker could not place.
+  The second is worth a second look; neither is worth discarding.
 
 `CROSS_REFERENCE` is deliberately excluded even though it is form-level in every
 other sense. "See Page 7" is a fact about one document's pagination; learned as
@@ -102,7 +114,9 @@ def _form_level_reason(a: Annotation, page: Page, linked: set[str],
         return "unlinked markup on a page with no fields"
     if a.bbox.y1 <= first_field_top + FIELD_CLEARANCE_PT:
         return "unlinked markup above the first field on the page"
-    return ""
+    # Among the fields, and still unlinked. It belongs to the form because
+    # nothing else will take it - see the module docstring.
+    return "markup the linker could not place on any field on this page"
 
 
 def _first_field_top(page: Page) -> float | None:

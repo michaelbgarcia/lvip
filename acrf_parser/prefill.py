@@ -76,6 +76,12 @@ MIN_PATTERN_DOMAINS = 2    # distinct domains that must attest a role suffix
 # across studies for different things), and shipping twenty rows for one label
 # would bury the reviewer rather than help them.
 MAX_ANNOTATIONS_PER_FIELD = 8
+# The same guard for a *form*, at a scale a form actually reaches. A form's own
+# markup is its domain header(s), its form-level constants, and every statement
+# the linker could not place on a field - and on a questionnaire page that is one
+# per question. The MSG Cornell Scale page carries nineteen. Eight is the right
+# ceiling for one label and quietly discards half a page here.
+MAX_ANNOTATIONS_PER_FORM = 40
 
 AUTO, NEEDS_REVIEW, NEEDS_MAPPING_STATUS = "AUTO", "NEEDS_REVIEW", "NEEDS_MAPPING"
 
@@ -98,6 +104,62 @@ class Candidate:
     # study read it in - which, since annotations are drawn left to right in the
     # reviewer's own order, is the reviewer's order. 0.0 when unknown.
     drawn_x: float = 0.0
+    # And where it was drawn, in a form the next CRF can be placed by: the
+    # annotation's own box as page fractions (`rel_*`), plus - for markup tied to
+    # a field - the relative label and offsets that box worked out to.
+    #
+    # This is placement evidence the house style cannot supply. A house style
+    # reports the *median* offset for an annotation type across a whole corpus,
+    # which is the right answer for a statement nobody has seen before and a poor
+    # one for a statement that was seen, on this form, on this field, in a spot
+    # somebody chose. It matters most for form-level markup, which has no field
+    # to be offset from at all: its own page position is the only record of where
+    # it belongs, and without it a page's domain headers were all redrawn in a
+    # band at the top left whatever the study actually did.
+    drawn: dict[str, Any] = dc_field(default_factory=dict)
+    # How it was rendered: text colour, fill, font and size, as the study drew
+    # this exact statement. The same argument as `drawn`, for appearance instead
+    # of position - the house style reports the corpus mode for an annotation
+    # *type*, which is the right answer for a statement nobody has seen and a
+    # weaker one for a statement that was seen. The MSG CRF sets its domain
+    # headers at 18pt, most variables at 12pt and a run of questionnaire markup
+    # at 10pt; a single per-type mode gets a fifth of them wrong, and since the
+    # box is measured from the text at that size, a wrong size is a wrong width
+    # and so a wrong position too.
+    style: dict[str, Any] = dc_field(default_factory=dict)
+
+    @property
+    def anchor(self) -> dict[str, Any] | None:
+        """The page-relative point this statement was drawn at, if history has it.
+
+        A *point*, not a box: the left edge on the row's centre line. The box is
+        re-measured from the text and the font on the way out, so keeping the old
+        width would only pin the new box's right edge to a string that is no
+        longer being drawn. The left edge is what a reader's eye follows down a
+        column of markup, so that is what is preserved.
+        """
+        d = self.drawn
+        if "rel_x_pct" not in d or "rel_y_pct" not in d:
+            return None
+        return {"rel_x_pct": round(d["rel_x_pct"] - d.get("rel_w_pct", 0.0) / 2, 4),
+                "rel_y_pct": round(d["rel_y_pct"], 4),
+                "rel_w_pct": 0.0, "rel_h_pct": 0.0}
+
+    @property
+    def box_width(self) -> float:
+        """How wide the study drew this statement's box, as a page fraction.
+
+        Separate from `anchor` because it answers a different question: not
+        where the box starts but what shape it is. Annotators wrap long markup
+        into a narrow column rather than running it across the page - the MSG
+        CRF sets "Reason for Discontinuation / 0 Ongoing / 1 Adverse Event / ..."
+        into six lines 189 points wide - and drawing that as one 600-point line
+        does not merely look different, it will not fit on the page at all, so
+        the placement arithmetic gives up and clamps it to the margin.
+
+        0.0 when history has no box for this statement, which means "measure it".
+        """
+        return round(float(self.drawn.get("rel_w_pct") or 0.0), 4)
 
 
 @dataclass
@@ -174,7 +236,10 @@ class PrefillIndex:
         rows = kb.con.execute(
             "SELECT file_name, form_name, domain, field_key, field_text,"
             " normalized_text, annotation_text, annot_type, variable, link_score,"
-            " trust, annotation_bbox FROM field_annotations").fetchall()
+            " trust, annotation_bbox, annotation_relative,"
+            " relative_label, offset_x_pct, offset_y_pct,"
+            " text_color, fill_color, font_name, font_size"
+            " FROM field_annotations").fetchall()
         idx = cls._build(dict(r) for r in rows)
         idx._seed_rejections(kb.con.execute(
             "SELECT field_key, annotation_text FROM rejected_suggestions"))
@@ -184,8 +249,15 @@ class PrefillIndex:
         idx._seed_domains(kb.con.execute(
             "SELECT normalized_name, domain FROM forms WHERE domain IS NOT NULL"
             " AND domain != ''"))
+        # Which page *of its form* each piece of form-level markup sat on. The
+        # view knows the PDF page; the form's own first page turns that into an
+        # offset, which is the only form portable to the next study. Computed
+        # here rather than in the view because `forms.pages` is stored as JSON,
+        # and reading it in Python beats picking it apart in SQL.
+        first = _form_first_pages(kb)
         idx._load_form_annotations(
-            dict(r) for r in kb.con.execute("SELECT * FROM form_annotations"))
+            dict(r, page_offset=_offset_from(r, first))
+            for r in (dict(x) for x in kb.con.execute("SELECT * FROM form_annotations")))
         idx._seed_rejections(kb.con.execute(
             "SELECT form_key, annotation_text FROM rejected_form_suggestions"))
         return idx
@@ -193,6 +265,8 @@ class PrefillIndex:
     @classmethod
     def from_documents(cls, docs: Document | Iterable[Document]) -> "PrefillIndex":
         """Build straight from parsed documents, without persisting first."""
+        from .template import placement_of
+
         docs = [docs] if isinstance(docs, Document) else list(docs)
         rows = []
         for doc in docs:
@@ -203,6 +277,9 @@ class PrefillIndex:
                 form = doc.form(fld.form_name) if fld else None
                 if not (fld and a):
                     continue
+                page = doc.page(a.page)
+                w, h = (page.width or 1.0, page.height or 1.0) if page else (1.0, 1.0)
+                label, off_x, off_y = placement_of(a.bbox, fld.bbox, w, h)
                 rows.append({
                     "file_name": doc.path.rsplit("/", 1)[-1],
                     "form_name": fld.form_name,
@@ -212,6 +289,16 @@ class PrefillIndex:
                     "annotation_text": a.text, "annot_type": a.annot_type,
                     "variable": (a.parsed or {}).get("variable") or "",
                     "annotation_bbox": list(a.bbox.as_tuple()),
+                    # Placement, computed exactly as `kb.build_kb` computes it for
+                    # the SQLite path - the two must agree or a corpus ingested
+                    # from disk would place markup differently from one held in
+                    # memory, and only one of them could be right.
+                    "annotation_relative": a.bbox.relative(w, h),
+                    "text_color": a.text_color, "fill_color": a.fill_color,
+                    "font_name": a.font_name, "font_size": a.font_size,
+                    "relative_label": label,
+                    "offset_x_pct": off_x,
+                    "offset_y_pct": off_y,
                     "link_score": link.link_score,
                 })
         idx = cls._build(rows)
@@ -224,7 +311,19 @@ class PrefillIndex:
              "domain": (doc.form(a.form_name).domain if doc.form(a.form_name) else ""),
              "annotation_text": a.text, "annot_type": a.annot_type,
              "variable": (a.parsed or {}).get("variable") or "",
-             "annotation_bbox": list(a.bbox.as_tuple()), "trust": GEOMETRIC}
+             "annotation_bbox": list(a.bbox.as_tuple()),
+             "annotation_relative": a.bbox.relative(
+                 (doc.page(a.page).width if doc.page(a.page) else 1.0) or 1.0,
+                 (doc.page(a.page).height if doc.page(a.page) else 1.0) or 1.0),
+             # Which page *of the form* it was on, never which page of the PDF -
+             # the same reason templates store page offsets. A form's markup is
+             # per page, and without this every page of a two-page questionnaire
+             # is proposed the markup of both.
+             "page_offset": a.page - (doc.form(a.form_name).first_page
+                                      if doc.form(a.form_name) else a.page),
+             "text_color": a.text_color, "fill_color": a.fill_color,
+             "font_name": a.font_name, "font_size": a.font_size,
+             "trust": GEOMETRIC}
             for doc in docs for a in doc.form_annotations() if a.form_name)
         return idx
 
@@ -253,6 +352,7 @@ class PrefillIndex:
                     variable=r["variable"] or "", annotation_text=r["annotation_text"],
                     annot_type=r["annot_type"], trust=trust,
                     drawn_x=_left_edge(r.get("annotation_bbox")),
+                    drawn=_drawn(r), style=_style(r),
                     source=f"{r['file_name']} · {r['form_name']} · {r['field_text']}",
                     evidence=[f"approved by a reviewer on {r['file_name']}" if approved
                               else f"(form, field_text) seen in {r['file_name']}"])
@@ -294,7 +394,17 @@ class PrefillIndex:
             if not key or not (r.get("annotation_text") or "").strip():
                 continue
             trust = r.get("trust") or GEOMETRIC
-            statement = statement_key(r["annotation_text"])
+            # Keyed by statement, page of the form, *and* where on that page it
+            # was drawn - an occurrence, not a conclusion, which is what the
+            # knowledge base stores everywhere else for the same reason.
+            #
+            # Both extra parts of the key earn their place. Without the page, a
+            # two-page eligibility form that prints `VISIT` and `IEDTC` at the
+            # top of both pages gives the pair to whichever page wins and leaves
+            # the other bare. Without the position, a page that says
+            # `[NOT SUBMITTED]` against three different questions gets one.
+            statement = (statement_key(r["annotation_text"]), r.get("page_offset"),
+                         _spot(r))
             prior = self.form_sets[key].get(statement)
             score = 1.0 if trust == HUMAN_APPROVED else CONF_EXACT
             if prior is None or _outranks(trust, score, prior):
@@ -306,6 +416,7 @@ class PrefillIndex:
                     annotation_text=r["annotation_text"],
                     annot_type=r.get("annot_type") or "", trust=trust,
                     drawn_x=_left_edge(r.get("annotation_bbox")),
+                    drawn=_drawn(r), style=_style(r),
                     source=f"{r.get('file_name', '')} · {r.get('form_name', '')}",
                     evidence=[f"form-level markup on {r.get('form_name')!r} in "
                               f"{r.get('file_name')}"])
@@ -313,9 +424,12 @@ class PrefillIndex:
                 self.domain_headers[str(r["domain"]).upper()][r["annotation_text"]] += 1
         for key, statements in self.form_sets.items():
             ranked = sorted(statements.values(),
-                            key=lambda c: (-TRUST_RANK.get(c.trust, 1), -c.confidence,
+                            key=lambda c: (_statement_page(c) or 0,
+                                           -TRUST_RANK.get(c.trust, 1), -c.confidence,
                                            c.drawn_x, c.annotation_text))
-            self.form_sets[key] = {statement_key(c.annotation_text): c for c in ranked}
+            self.form_sets[key] = {
+                (statement_key(c.annotation_text), _statement_page(c),
+                 _spot({"annotation_relative": c.drawn})): c for c in ranked}
 
     def _seed_rejections(self, pairs) -> None:
         for key, annotation in pairs:
@@ -389,7 +503,8 @@ class PrefillIndex:
             kept.append(c)
         return kept
 
-    def match_form(self, anchor: FormAnchor, domain: str = "") -> Prefill:
+    def match_form(self, anchor: FormAnchor, domain: str = "",
+                   page_offset: int | None = None) -> Prefill:
         """What markup this form carries in its own right, as a set of rows.
 
         Three outcomes, and the third is the one that matters most:
@@ -403,15 +518,25 @@ class PrefillIndex:
         * nothing at all - one NEEDS_MAPPING row. This is the fix. Previously
           the form-level layer was silently absent from the sheet, so nobody was
           ever asked about it and the annotated PDF came out missing its headers.
+
+        `page_offset` is which page *of this form* the anchor is - 0 for its
+        first page. A form's markup belongs to particular pages of it, so a
+        two-page questionnaire whose second page carries eleven `QSORRES ...`
+        statements must not have all eleven proposed on its first page as well.
+        Statements the corpus recorded no page for are offered on every page,
+        which is the honest answer when there is nothing to place them by.
         """
         key = normalize(anchor.form_name)
         form_key = f"form|{key}"
         seen = [_fresh(c) for c in self.form_sets.get(key, {}).values()]
         seen = [c for c in self._drop_rejected(form_key, seen) if c.confidence > 0]
+        if page_offset is not None:
+            seen = [c for c in seen
+                    if _statement_page(c) in (None, page_offset)]
         if seen:
             return Prefill(field_id=anchor.id, form_name=anchor.form_name,
                            field_text=anchor.text, best=seen[0],
-                           companions=seen[1:MAX_ANNOTATIONS_PER_FIELD])
+                           companions=seen[1:MAX_ANNOTATIONS_PER_FORM])
 
         proposed = self._domain_header(domain or anchor.domain, form_key)
         best = proposed or Candidate(
@@ -540,6 +665,120 @@ def _left_edge(bbox: Any) -> float:
         return 0.0
 
 
+# Placement facts a corpus row may carry: the annotation's own page-relative box,
+# and - only where it was linked to a field - what that box was relative to the
+# field. Both are optional, and a row missing them simply falls back to the
+# house style, which is what every row did before they existed.
+_PLACEMENT_KEYS = ("relative_label", "offset_x_pct", "offset_y_pct", "page_offset")
+
+
+def _drawn(row: dict) -> dict[str, Any]:
+    """Where one stored annotation was drawn, in re-placeable form.
+
+    Tolerant about shape on purpose: the same fields arrive as JSON strings from
+    SQLite and as dicts from an in-memory parse, and a corpus written before
+    these columns existed has neither. A missing value is not an error - it means
+    the house style answers for that row.
+    """
+    out: dict[str, Any] = {}
+    rel = row.get("annotation_relative")
+    if isinstance(rel, str):
+        try:
+            rel = json.loads(rel)
+        except ValueError:
+            rel = None
+    if isinstance(rel, dict):
+        for k, v in rel.items():
+            if k.startswith("rel_") and isinstance(v, (int, float)):
+                out[k] = float(v)
+    for k in _PLACEMENT_KEYS:
+        v = row.get(k)
+        if v not in (None, ""):
+            out[k] = v if isinstance(v, str) else float(v)
+    return out
+
+
+def _form_first_pages(kb) -> dict[tuple[str, str], int]:
+    """(file, normalized form name) -> the form's first page, from the corpus.
+
+    Keyed by file as well as form because two studies in one corpus each have
+    their own copy of a form, on their own pages.
+    """
+    out: dict[tuple[str, str], int] = {}
+    for r in kb.con.execute(
+            "SELECT d.file_name, fm.normalized_name, fm.pages FROM forms fm"
+            " JOIN documents d ON d.id = fm.document_id"):
+        r = dict(r)
+        try:
+            pages = json.loads(r["pages"] or "[]")
+        except ValueError:
+            pages = []
+        if pages:
+            out[(r["file_name"], r["normalized_name"])] = min(int(p) for p in pages)
+    return out
+
+
+def _offset_from(row: dict, first: dict[tuple[str, str], int]) -> int | None:
+    page = row.get("page")
+    start = first.get((row.get("file_name"), row.get("normalized_name")))
+    return int(page) - start if page is not None and start is not None else None
+
+
+_STYLE_KEYS = ("text_color", "fill_color", "font_name", "font_size")
+
+
+def _style(row: dict) -> dict[str, Any]:
+    """How one stored annotation was rendered, in the form the workbook wants.
+
+    Colours arrive as RGB tuples in memory and as JSON strings from SQLite, and
+    a corpus written before these columns existed has neither - a missing value
+    simply means the house style answers for that row, which is what every row
+    did before this existed.
+    """
+    out: dict[str, Any] = {}
+    for k in _STYLE_KEYS:
+        v = row.get(k)
+        if isinstance(v, str) and v.startswith("["):
+            try:
+                v = json.loads(v)
+            except ValueError:
+                v = None
+        if v in (None, "", []):
+            continue
+        out[k] = tuple(v) if isinstance(v, (list, tuple)) else v
+    return out
+
+
+# How finely two drawn positions have to differ to be different occurrences.
+# One percent of the page: far coarser than the placement it feeds, because the
+# question here is only "is this the same piece of markup or another one", and
+# the same statement re-drawn in the same spot by a second study should fold
+# into one candidate rather than becoming a second row on the sheet.
+SPOT_PCT = 2
+
+
+def _spot(row: dict) -> tuple[float, float] | None:
+    """Where a stored annotation sat, rounded to `SPOT_PCT` decimal places."""
+    rel = row.get("annotation_relative")
+    if isinstance(rel, str):
+        try:
+            rel = json.loads(rel)
+        except ValueError:
+            rel = None
+    if not isinstance(rel, dict):
+        return None
+    x, y = rel.get("rel_x_pct"), rel.get("rel_y_pct")
+    if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+        return None
+    return (round(float(x), SPOT_PCT), round(float(y), SPOT_PCT))
+
+
+def _statement_page(candidate: "Candidate") -> int | None:
+    """Which page of its form a form-level statement was drawn on, if recorded."""
+    offset = candidate.drawn.get("page_offset")
+    return int(offset) if offset is not None else None
+
+
 def _fresh(candidate: Candidate | None) -> Candidate | None:
     """A per-field copy of an indexed candidate.
 
@@ -609,8 +848,19 @@ def prefill_document(doc: Document, index: PrefillIndex) -> list[Prefill]:
 
 def prefill_forms(doc: Document, index: PrefillIndex) -> list[Prefill]:
     """Pre-fill the form-level layer: one result per page that belongs to a form."""
-    return [index.match_form(page.anchor, domain=page_domain(doc, page, index))
+    return [index.match_form(page.anchor, domain=page_domain(doc, page, index),
+                             page_offset=_form_page_offset(doc, page))
             for page in doc.pages if page.anchor is not None]
+
+
+def _form_page_offset(doc: Document, page) -> int | None:
+    """Which page of its own form this page is - 0 for the form's first.
+
+    An offset, never a PDF page number, for the reason templates give: Medical
+    History being pages 2-3 here and 11-12 in the next study is not a difference.
+    """
+    form = doc.form(page.form_name)
+    return page.number - form.first_page if form and form.pages else None
 
 
 def page_domain(doc: Document, page, index: PrefillIndex) -> str:

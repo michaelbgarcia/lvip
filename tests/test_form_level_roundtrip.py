@@ -118,13 +118,19 @@ def test_the_headers_are_drawn_across_the_top_of_the_page(approved, coloured_bla
     assert report.to_dict()["form_annotations"] == 4
 
     again = parse_pdf(out)
-    headers = [a.text for a in again.form_annotations(1)]
-    assert headers == ["DS=Disposition", "DM=Demographics", "DSCAT = PROTOCOL MILESTONE"]
+    # The three form-level statements, in the order they were drawn. Read off
+    # the *header band* rather than off `form_annotations`: that now also holds
+    # field markup the linker could not place on the re-parse, which belongs to
+    # the form for want of anywhere better and is a different claim from "this
+    # is the row of headers across the top".
+    wanted = ["DS=Disposition", "DM=Demographics", "DSCAT = PROTOCOL MILESTONE"]
+    boxes = {a.text: a.bbox for a in again.form_annotations(1)}
+    assert set(wanted) <= set(boxes)
+    band = [boxes[t] for t in wanted]
     # Above every field on the page, and left to right along one band.
-    boxes = [a.bbox for a in again.form_annotations(1)]
-    assert max(b.y1 for b in boxes) <= min(f.bbox.y0 for f in again.page(1).fields)
-    assert [b.x0 for b in boxes] == sorted(b.x0 for b in boxes)
-    assert len({round(b.y0, 1) for b in boxes}) == 1
+    assert max(b.y1 for b in band) <= min(f.bbox.y0 for f in again.page(1).fields)
+    assert [b.x0 for b in band] == sorted(b.x0 for b in band)
+    assert len({round(b.y0, 1) for b in band}) == 1
 
 
 def test_the_domain_fills_land_on_the_page(approved, coloured_blank, tmp_path):

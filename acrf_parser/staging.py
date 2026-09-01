@@ -31,7 +31,7 @@ importer name the one that is wrong.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -52,8 +52,30 @@ SHEET_STYLE, SHEET_FORMS, SHEET_README = "HouseStyle", "Forms", "Instructions"
 SHEET_FILLS = "DomainFills"
 
 STATUSES = ["AUTO", "NEEDS_REVIEW", "NEEDS_MAPPING", "APPROVED", "REJECTED"]
-ANNOT_TYPES = ["VARIABLE", "CONSTANT_ASSIGNMENT", "SUPP_QUALIFIER", "NOT_SUBMITTED",
-               "DERIVATION_RULE", "CROSS_REFERENCE", "DOMAIN_HEADER", "NOTE"]
+
+# Where a row's position came from. Recorded on the Geometry sheet because it
+# changes what the position *means* - and because the writer needs it: rows that
+# share one starting point have to be chained left to right so they do not all
+# land on top of each other, and rows that each carry their own recorded point
+# must be left exactly where they are.
+LEARNED = "history"          # this statement's offset from this field, recorded
+LEARNED_SPOT = "history_page"  # its position on the page, when the offset is not usable
+HOUSE_STYLE = "house_style"  # the corpus median for annotations of this type
+HEADER_BAND = "header_band"  # the page's own header band - no evidence either way
+
+# How far from its field a *learned* offset may put an annotation before it stops
+# being evidence and starts being a linking error copied forward. Page fractions.
+MAX_LEARNED_OFFSET_X = 0.35
+MAX_LEARNED_OFFSET_Y = 0.08
+
+# Reported in `fill_basis` when the fill came from this exact statement's own
+# appearance in a previous study rather than from a rule about its type or its
+# domain. The most specific evidence there is, and worth saying so.
+FILL_SEEN = "this exact statement's own fill in a previous study"
+
+ANNOT_TYPES = ["VARIABLE", "CONSTANT_ASSIGNMENT", "CONDITIONAL_VARIABLE",
+               "SUPP_QUALIFIER", "NOT_SUBMITTED", "DERIVATION_RULE",
+               "CROSS_REFERENCE", "DOMAIN_HEADER", "NOTE"]
 SCOPES = [FIELD_SCOPE, FORM_SCOPE]
 
 # Columns the human and the agent fill in. Everything else is evidence or is locked.
@@ -139,25 +161,84 @@ def build_staging(doc: Document, index: PrefillIndex | None = None,
             r = form_results.get(page.anchor.id)
             for seq, candidate in enumerate(r.annotations if r else [None], start=1):
                 rows.append(_form_row(page, page.anchor, r, candidate, seq, house))
+        carriers = _carriers(page, results)
         for fld in page.fields:
             r = results.get(fld.id)
-            candidates = r.annotations if r else [None]
+            candidates = (r.annotations if r else [None]) if carriers.get(fld.id, True) else [None]
             for seq, candidate in enumerate(candidates, start=1):
                 rows.append(_row(doc, page, fld, r, candidate, seq, house))
     return rows
 
 
-def _form_row(page, anchor, result, best, seq: int, house: HouseStyle) -> StagingRow:
-    """One form-level annotation, anchored to the page's header band.
+def _carriers(page, results) -> dict[str, bool]:
+    """Which of a page's fields should actually carry the markup for their key.
 
-    Placement and offsets are fixed rather than taken from the house style. The
-    house style's placement is measured from *field* markup - "12pt right of the
-    label" - and an anchor is not a label: it is the point the row of headers
-    starts at, so the first annotation sits on it and the rest chain rightwards
-    off each other exactly as they are drawn.
+    A log form repeats one question down the page - twelve blank medication rows,
+    seventeen adverse-event rows - and every repetition normalizes to the same
+    `(form, field_text)` key. Pre-fill answers each of them, which is right: they
+    are all that field. But an annotator does not write `CMTRT` beside all twelve
+    rows, they write it once against the column, and a pipeline that draws it
+    twelve times has not been thorough, it has defaced the page.
+
+    Which one keeps it is not a guess either. History recorded where the
+    statement was drawn, so the occurrence that keeps it is the one nearest that
+    spot - and where a key was drawn on several occurrences, that many keep it.
+    The rest get their usual NEEDS_MAPPING row: a reviewer is still asked about
+    every field, they are simply not handed the same answer twelve times.
+
+    Fields whose key appears once on the page - almost all of them - are
+    untouched, and so is any key history has no position for.
+    """
+    by_key: dict[tuple[str, str], list] = {}
+    for fld in page.fields:
+        by_key.setdefault(fld.key, []).append(fld)
+
+    out: dict[str, bool] = {}
+    for key, fields in by_key.items():
+        if len(fields) < 2:
+            continue
+        spots = [c.anchor for f in fields[:1]
+                 for c in (results[f.id].annotations if results.get(f.id) else [])
+                 if c is not None and c.anchor]
+        if not spots:
+            continue                      # no recorded position: change nothing
+        w = page.width or 1.0
+        h = page.height or 1.0
+        chosen = set()
+        for spot in spots:
+            x, y = spot["rel_x_pct"] * w, spot["rel_y_pct"] * h
+            near = min(fields, key=lambda f: (f.bbox.cx - x) ** 2 + (f.bbox.cy - y) ** 2)
+            chosen.add(near.id)
+        for f in fields:
+            out[f.id] = f.id in chosen
+    return out
+
+
+def _form_row(page, anchor, result, best, seq: int, house: HouseStyle) -> StagingRow:
+    """One form-level annotation, placed where history drew it.
+
+    Form-level markup is the case with no field to be positioned against, so the
+    house style has nothing to say about where it goes - its offsets are measured
+    from *field* markup ("12pt right of the label"), and an anchor is not a
+    label. Two answers, in order:
+
+    * **Where this study drew this exact statement**, as a fraction of the page.
+      A real aCRF does not stack its domain headers in one band: the MSG
+      Demography page carries `DM=Demographics` at the top, `SC=Subject
+      Characteristics` beside the family-status block halfway down, and
+      `DS=Disposition` above the consent date at the foot. Redrawing all three at
+      the top left is not a small error - it is most of a page's height.
+    * **The page's header band**, for a statement history has no position for.
+      The first lands on the anchor and the rest chain rightwards off each other,
+      which is how a row of domain headers is drawn and read.
+
+    `anchor_source` records which of the two answered, so the writer knows
+    whether these rows share a starting point (chain them) or each carry their
+    own (leave them where they are), and a reviewer can see it in the sheet.
     """
     status = (result.status_of(best) if result and best else pf.NEEDS_MAPPING_STATUS)
     rule, basis = _rule_for(house, best)
+    learned = best.anchor if best else None
     return StagingRow(
         row_id=anchor.id,
         annot_seq=seq,
@@ -180,18 +261,45 @@ def _form_row(page, anchor, result, best, seq: int, house: HouseStyle) -> Stagin
         geometry={
             "row_id": anchor.id, "annot_seq": seq, "page": anchor.page,
             "page_width": page.width, "page_height": page.height,
-            **anchor.bbox.relative(page.width, page.height),
+            **(learned or anchor.bbox.relative(page.width, page.height)),
             "offset_x_pct": 0.0, "offset_y_pct": 0.0,
+            "box_w_pct": best.box_width if best else 0.0,
+            "anchor_source": LEARNED if learned else HEADER_BAND,
             "group_id": "", "field_confidence": "",
         },
     )
 
 
 def _rule_for(house: HouseStyle, best) -> tuple[Any, str]:
-    """Style for one proposed annotation, plus where its fill came from."""
+    """Style for one proposed annotation, plus where its fill came from.
+
+    The house style answers first, then the statement's own recorded appearance
+    overrides it where history has one. Both are measurements, so this is not a
+    guess beating a rule - it is the more specific measurement beating the more
+    general one, the same order `_placement_for` puts them in.
+
+    The house style still decides for everything history has never seen, and the
+    HouseStyle sheet still reports the corpus conventions and their agreement,
+    which is what a reviewer needs in order to settle a convention *once*.
+
+    Fill follows the same order, and `fill_basis` says which answered. The
+    domain rule is still what reaches a statement the corpus has never seen -
+    that is the whole point of measuring fill per domain - but where the corpus
+    drew *this* statement, that colour wins. It has to: a domain rule is a mode
+    over a whole corpus, and on the MSG CRF, where 188 of 206 boxes are cyan, it
+    reports cyan for DS markup that the sponsor drew yellow on the very page the
+    distinction matters.
+    """
     annot_type = best.annot_type if best and best.annot_type else "VARIABLE"
     text = best.annotation_text if best else ""
-    return house.for_annotation(annot_type, text)
+    rule, basis = house.for_annotation(annot_type, text)
+    seen = best.style if best else {}
+    overrides = {k: v for k, v in seen.items()
+                 if k in ("text_color", "font_name", "font_size") and v}
+    if seen.get("fill_color") and seen["fill_color"] != rule.fill_color:
+        overrides["fill_color"] = seen["fill_color"]
+        basis = FILL_SEEN
+    return (replace(rule, **overrides) if overrides else rule), basis
 
 
 def _suggestion_values(result, best, status: str) -> dict[str, Any]:
@@ -216,9 +324,31 @@ def _suggestion_values(result, best, status: str) -> dict[str, Any]:
 
 
 def _row(doc, page, fld, result, best, seq: int, house: HouseStyle) -> StagingRow:
+    """One annotation of one field, positioned from the best evidence available.
+
+    Three answers, in order of how specific the evidence is:
+
+    1. **The offset history recorded from this field.** Portable - it survives
+       the form being re-flowed - and it is a claim about this exact statement.
+    2. **The page position history recorded**, where that offset is missing or
+       implausible. Less portable, because it says nothing about the field it
+       belongs to, but it is still where somebody put this statement rather than
+       an average of where they put statements like it. That happens on log
+       forms, where one key names seventeen repeating rows and the offset the
+       linker measured is to whichever one it picked.
+    3. **The house style**, the median over every annotation of this type in the
+       corpus - the right answer for a statement nobody has seen.
+
+    `anchor_source` records which, so a reviewer asking why a box landed
+    somewhere gets the actual reason rather than a plausible one.
+    """
     status = (result.status_of(best) if result and best
               else pf.NEEDS_MAPPING_STATUS)
     rule, basis = _rule_for(house, best)
+    placement, off_x, off_y, source = _placement_for(rule, best)
+    spot = None if source == LEARNED else _spot_geometry(best, page)
+    if spot:
+        placement, off_x, off_y, source = RIGHT_OF, 0.0, 0.0, LEARNED_SPOT
     return StagingRow(
         row_id=fld.id,
         annot_seq=seq,
@@ -242,16 +372,55 @@ def _row(doc, page, fld, result, best, seq: int, house: HouseStyle) -> StagingRo
             "fill_basis": basis,
             "font_name": rule.font_name,
             "font_size": rule.font_size or "",
-            "placement": rule.placement,
+            "placement": placement,
         },
         geometry={
             "row_id": fld.id, "annot_seq": seq, "page": fld.page,
             "page_width": page.width, "page_height": page.height,
-            **fld.bbox.relative(page.width, page.height),
-            "offset_x_pct": rule.offset_x_pct, "offset_y_pct": rule.offset_y_pct,
+            **(spot or fld.bbox.relative(page.width, page.height)),
+            "offset_x_pct": off_x, "offset_y_pct": off_y,
+            "box_w_pct": best.box_width if best else 0.0,
+            "anchor_source": source,
             "group_id": fld.group_id, "field_confidence": fld.confidence,
         },
     )
+
+
+def _spot_geometry(best, page) -> dict[str, float] | None:
+    """This statement's own recorded position, as a zero-width point to start at.
+
+    Used in place of the field's box when the offset from that field is not
+    usable. A zero-width box with `right_of_field` and no offset reproduces the
+    recorded left edge exactly, and lets the new box take whatever width its own
+    text needs - the same shape `_form_row` uses, for the same reason.
+    """
+    return best.anchor if best else None
+
+
+def _placement_for(rule, best) -> tuple[str, float, float, str]:
+    """(placement, offset_x_pct, offset_y_pct, where it came from) for one row.
+
+    History first, house style second. The distinction is worth keeping visible:
+    a row placed from the corpus is a claim about *this* statement on *this*
+    field, and a row placed from the house style is a claim about annotations of
+    this type in general. When a reviewer asks why a box landed somewhere, those
+    are two different answers.
+
+    History is only believed within `MAX_LEARNED_OFFSET`. An offset is the gap
+    between an annotation and the field it was *linked to*, so an implausible one
+    is not a fact about how this sponsor draws markup - it is a linking mistake,
+    and using it would copy that mistake onto the new CRF at full confidence.
+    Real aCRF markup sits beside its label: on the MSG corpus the offsets run to
+    about a third of the page width, and the handful beyond that are all markup
+    the linker attached to a field on the other side of a log-form grid.
+    """
+    drawn = best.drawn if best else {}
+    if drawn.get("relative_label"):
+        dx = round(float(drawn.get("offset_x_pct") or 0.0), 4)
+        dy = round(float(drawn.get("offset_y_pct") or 0.0), 4)
+        if abs(dx) <= MAX_LEARNED_OFFSET_X and abs(dy) <= MAX_LEARNED_OFFSET_Y:
+            return str(drawn["relative_label"]), dx, dy, LEARNED
+    return rule.placement, rule.offset_x_pct, rule.offset_y_pct, HOUSE_STYLE
 
 
 def _hex(color) -> str:
@@ -339,7 +508,8 @@ def _geometry_sheet(wb: Workbook, rows: list[StagingRow]) -> None:
     ws = wb.create_sheet(SHEET_GEOM)
     keys = ["row_id", "annot_seq", "page", "page_width", "page_height",
             "rel_x_pct", "rel_y_pct", "rel_w_pct", "rel_h_pct",
-            "offset_x_pct", "offset_y_pct", "group_id", "field_confidence"]
+            "offset_x_pct", "offset_y_pct", "box_w_pct", "anchor_source",
+            "group_id", "field_confidence"]
     ws.append(keys)
     for cell in ws[1]:
         cell.font = Font(bold=True, color="FFFFFF")

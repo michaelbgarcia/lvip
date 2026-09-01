@@ -143,3 +143,76 @@ def test_an_annotations_own_box_is_not_a_response_control(doc):
     p = doc.page(1)
     for c in p.controls:
         assert not any(c.bbox.inside_frac(a.bbox) >= 0.9 for a in p.annotations)
+
+
+# --- against the real MSG CRF ----------------------------------------------
+# The synthetic fixture above is drawn to A4, unrotated, with every annotation
+# well formed. The cases below are the ones a real file supplied and it did not.
+def test_a_quarter_turned_page_is_extracted_in_reading_order(msg_run):
+    """PyMuPDF reports two coordinate systems for a /Rotate 90 page.
+
+    `page.rect` is the rotated view a reader sees; `get_text`, `annot.rect` and
+    `get_drawings` are all in the unrotated page space, where a landscape page
+    is 612 wide and 792 tall and the rows run down the x axis. Phase 1 resolves
+    that once - see `extract.display_matrix` - so nothing below it has to know a
+    page can be turned.
+    """
+    page = msg_run.annotated.page(9)
+    assert page.rotation == 90
+    assert (page.width, page.height) == (792.0, 612.0)
+    for obj in (*page.lines, *page.words, *page.annotations):
+        assert obj.bbox.x1 <= page.width + 1, obj
+        assert obj.bbox.y1 <= page.height + 1, obj
+
+
+def test_a_turned_pages_wrapped_label_is_one_label(msg_run):
+    """"Reason for Discontinuation" is three rendered lines running down the x
+    axis. Read unrotated they are three unrelated fragments in three columns."""
+    page = msg_run.blank.page(9)
+    assert any("Reason for Discontinuation" in g.text for g in page.groups)
+
+
+def test_a_reviewers_sticky_notes_are_not_extracted(msg_run):
+    """`Text` annotations are Acrobat's review comments, not markup on the form."""
+    assert all(a.subtype == "FreeText" for a in msg_run.annotated.iter_annotations())
+
+
+def test_an_empty_freetext_box_is_not_an_annotation(msg_run):
+    """Text is the whole of what a FreeText says, so an empty one says nothing."""
+    assert all(a.text.strip() for a in msg_run.annotated.iter_annotations())
+
+
+def test_the_da_string_survives_a_real_studys_font_name(msg_run):
+    """This corpus is Arial bold-italic at three sizes."""
+    a = next(a for a in msg_run.annotated.iter_annotations() if a.text == "SITEID")
+    assert a.font_name == "Arial,BoldItalic"
+    sizes = {x.font_size for x in msg_run.annotated.iter_annotations()}
+    assert {10.0, 12.0, 18.0} <= sizes
+
+
+def test_the_painted_colour_beats_the_one_da_claims(msg_run):
+    """/DA says black for every annotation on this CRF. The variables are red.
+
+    The appearance stream sets `1 0 0 rg` after /DA has had its say, and the
+    appearance stream is what a reader paints - so believing /DA would learn a
+    house style of black text from a corpus that is not black, and draw the next
+    study's aCRF in a colour nobody used.
+    """
+    from collections import Counter
+    colours = Counter(a.text_color for a in msg_run.annotated.iter_annotations())
+    assert colours[(1.0, 0.0, 0.0)] > 150     # the variables: red
+    assert colours[(0.0, 0.0, 0.0)] > 20      # the domain headers: black
+    variable = next(a for a in msg_run.annotated.iter_annotations()
+                    if a.text == "SITEID")
+    header = next(a for a in msg_run.annotated.iter_annotations()
+                  if a.text == "DM=Demographics")
+    assert variable.text_color == (1.0, 0.0, 0.0)
+    assert header.text_color == (0.0, 0.0, 0.0)
+
+
+def test_the_fill_is_colour_coded_by_domain(msg_run):
+    """DM markup on pale cyan, DS on pale yellow, SC on pale green."""
+    fills = {a.text: a.fill_color for a in msg_run.annotated.page(6).annotations}
+    assert fills["DM=Demographics"] == (0.75, 1.0, 1.0)
+    assert fills["DS=Disposition"] == (1.0, 1.0, 0.667)
+    assert fills["SC=Subject Characteristics"] == (0.75, 1.0, 0.75)

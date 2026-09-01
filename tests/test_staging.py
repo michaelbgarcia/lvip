@@ -49,8 +49,21 @@ def _rows(book, sheet=st.SHEET_WORK):
     return [dict(zip(names, r)) for r in ws.iter_rows(min_row=2, values_only=True)]
 
 
-FIELD_ROWS, FORM_ROWS = 14, 5
+# The blank CRF has 14 fields. Form rows are not one per page: they are one per
+# *statement* the form carries in its own right, which is the page's domain
+# header plus any markup the linker could not place on a field. Page 1 of the
+# fixture carries two annotations with no field beside them - deliberately, to
+# pin that they are not force-fitted onto a neighbour - and each of those is now
+# a row of its own rather than being dropped on the floor.
+FIELD_ROWS, FORM_ROWS = 14, 7
 ALL_ROWS = FIELD_ROWS + FORM_ROWS
+# Pages that belong to a form, and so get an anchor. With no history each is one
+# NEEDS_MAPPING row; with history a page's anchor carries a row per statement.
+FORM_PAGES = 5
+# Form rows history can answer outright. Not all seven: the corpus saw
+# "MH=Medical History" on the form's *first* page, so proposing it again on the
+# two continuation pages is a suggestion, not a fact, and it arrives as one.
+FORM_AUTO = 5
 
 
 def _field_rows(rows):
@@ -68,7 +81,8 @@ def test_one_row_per_field(work, blank_doc):
     fields = _field_rows(rows)
     assert len(fields) == len(list(blank_doc.iter_fields())) == FIELD_ROWS
     assert [r["row_id"] for r in fields] == [f.id for f in blank_doc.iter_fields()]
-    assert {r["annot_seq"] for r in rows} == {1}
+    # Of the *fields*. A form row may be one of several on its page's anchor.
+    assert {r["annot_seq"] for r in fields} == {1}
 
 
 def test_auto_rows_arrive_decided(work):
@@ -177,12 +191,22 @@ def test_every_other_field_still_gets_exactly_one_row(multi_book, blank_doc):
     assert len(counts) == len(list(blank_doc.iter_fields())) - 1
 
 
-def test_both_rows_describe_the_same_box(multi_book):
-    """Siblings share their field's geometry - only the seq distinguishes them."""
+def test_both_rows_carry_a_position_of_their_own(multi_book):
+    """A sibling row gets its own geometry row, and says where it came from.
+
+    Siblings used to share their field's box outright. Where history has no
+    position for a statement they still effectively do - and the importer's
+    inheritance rule still covers a row a *reviewer* adds, who cannot write to
+    the locked Geometry sheet at all. But where history recorded where a
+    statement was actually drawn, each sibling carries that spot rather than the
+    field's, which is how a set that was spread across a page comes back spread
+    instead of piled along one row.
+    """
     geom = [g for g in _rows(multi_book, st.SHEET_GEOM) if g["row_id"] == "p1f0"]
     assert [g["annot_seq"] for g in geom] == [1, 2]
-    box = lambda g: (g["rel_x_pct"], g["rel_y_pct"], g["rel_w_pct"], g["rel_h_pct"])
-    assert box(geom[0]) == box(geom[1])
+    for g in geom:
+        assert 0.0 <= g["rel_x_pct"] <= 1.0 and 0.0 <= g["rel_y_pct"] <= 1.0
+        assert g["anchor_source"] in (st.LEARNED, st.LEARNED_SPOT, st.HOUSE_STYLE)
 
 
 def test_the_summary_counts_rows_and_fields_separately(blank_doc, multi_index, house):
@@ -213,7 +237,10 @@ def test_a_first_study_still_produces_a_workbook(blank_doc, tmp_path):
     ws = load_workbook(path)[st.SHEET_WORK]
     names = [c.value for c in ws[1]]
     rows = [dict(zip(names, r)) for r in ws.iter_rows(min_row=2, values_only=True)]
-    assert len(rows) == ALL_ROWS
+    # One row per field, and one per page that belongs to a form. The extra form
+    # rows only exist where history has statements to put in them, and here
+    # there is no history - so this is the floor, not ALL_ROWS.
+    assert len(rows) == FIELD_ROWS + FORM_PAGES
     assert all(r["status"] == "NEEDS_MAPPING" for r in rows)
     assert all(not r["final_variable"] for r in rows)
 
@@ -221,4 +248,4 @@ def test_a_first_study_still_produces_a_workbook(blank_doc, tmp_path):
 def test_summary(blank_doc, index, house):
     s = st.summarize_staging(st.build_staging(blank_doc, index, house))
     assert s["rows"] == ALL_ROWS and s["fields"] == FIELD_ROWS
-    assert s["by_status"]["AUTO"] == 9 + FORM_ROWS
+    assert s["by_status"]["AUTO"] == 9 + FORM_AUTO

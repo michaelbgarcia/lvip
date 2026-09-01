@@ -127,3 +127,50 @@ def test_summary(doc):
     s = ann.summarize_annotations(list(doc.iter_annotations()))
     assert s["annotations"] == 17 and s["statements"] == 17 and s["ambiguous"] == []
     assert s["by_type"]["VARIABLE"] == 7
+
+
+# --- the findings convention, from the real MSG CRF ------------------------
+# Seventy of the MSG CRF's 206 annotations are this shape, and every one of them
+# read as unclassified prose before it had a type.
+@pytest.mark.parametrize("text,variables,cond,values,domain", [
+    ("IEORRES when IETESTCD = INCL01", ["IEORRES"], "IETESTCD", ["INCL01"], "IE"),
+    ("QSORRES when QSTESTCD = MMSEA1", ["QSORRES"], "QSTESTCD", ["MMSEA1"], "QS"),
+    ("VSORRES / VSORRESU when VSTESTCD = SYSBP, DIABP",
+     ["VSORRES", "VSORRESU"], "VSTESTCD", ["SYSBP", "DIABP"], "VS"),
+    ("DADTC when DATESTCD=DISPAMT", ["DADTC"], "DATESTCD", ["DISPAMT"], "DA"),
+    # Typed without the spaces. Two of the MSG CRF's are, and they are as
+    # structured as the rest - a parser that only reads tidy input reports the
+    # annotator's typo as prose.
+    ("QSORRESwhen QSTESTCD = CSDD19", ["QSORRES"], "QSTESTCD", ["CSDD19"], "QS"),
+    ("QSORRES when QSTESTCD =CSDD04", ["QSORRES"], "QSTESTCD", ["CSDD04"], "QS"),
+])
+def test_a_findings_observation_is_named_by_its_test_code(
+        text, variables, cond, values, domain):
+    part = ann.classify(text)
+    assert part.annot_type == ann.CONDITIONAL_VARIABLE
+    assert part.parsed["variables"] == variables
+    assert part.parsed["variable"] == variables[0]
+    assert part.parsed["condition"] == {"variable": cond, "values": values}
+    assert part.parsed["domain"] == domain
+
+
+def test_supp_still_wins_over_the_conditional_shape():
+    """"RACEOTH when SUPPDM.QNAM=RACEOTH" has the same shape and is the more
+    specific case, so the SUPP test has to come first."""
+    assert _type("RACEOTH when SUPPDM.QNAM=RACEOTH") == ann.SUPP_QUALIFIER
+
+
+def test_the_in_supp_shorthand_names_its_qualifier():
+    """"RACEOTH in SUPPDM" is how the MSG CRF writes it throughout, and the
+    variable is not readable from anywhere else in the string."""
+    part = ann.classify("RACEOTH in SUPPDM")
+    assert part.annot_type == ann.SUPP_QUALIFIER
+    assert part.parsed["variable"] == "RACEOTH"
+    assert part.parsed["domain"] == "DM" and part.parsed["qnam"] == "RACEOTH"
+
+
+def test_a_constant_may_be_assigned_to_several_variables():
+    """"DSTERM / DSDECOD = RANDOMIZED" is ordinary annotator shorthand."""
+    part = ann.classify("DSTERM / DSDECOD = RANDOMIZED")
+    assert part.annot_type == ann.CONSTANT_ASSIGNMENT
+    assert part.parsed["variable"] == "DSTERM" and part.parsed["value"] == "RANDOMIZED"

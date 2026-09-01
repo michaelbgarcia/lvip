@@ -15,19 +15,30 @@ Everything below assumes commands run from the repo root, using `.venv/bin/pytho
 
 ## 2. Get a PDF to work with
 
-There's no real aCRF checked in — `data/sample_acrf.pdf` is a synthetic
-5-page, 17-annotation fixture. Regenerate it (or build a second, matching
-"blank" study) with:
+`data/` holds the CDISC SDTM Metadata Submission Guidelines example CRF, twice:
+
+| file | what it is |
+|---|---|
+| `data/blankcrf_annotated.pdf` | the aCRF — 22 pages, 206 SDTM annotations |
+| `data/blankcrf.pdf` | the same 22 pages with the markup removed |
+
+That pairing is the point. The two files are the same CRF, so the annotated one
+is a complete answer key for the blank one: ingest the annotated CRF as history,
+stage the blank one, and every annotation that comes out can be compared with
+the one the sponsor actually drew. Swap in your own aCRF/blank pair anywhere
+below.
+
+A synthetic fixture is also generated on the fly by the tests, for the cases
+this one real CRF has no example of. You can write it out if you want to look at
+it:
 
 ```bash
 # writes data/sample_acrf.pdf (annotated) and prints its path
 .venv/bin/python tests/sample_pdf.py
 ```
 
-Look at [tests/sample_pdf.py](tests/sample_pdf.py) — `build()` makes the
-annotated fixture, `build_second_study()` makes a second study used by the
-cross-form tests. For a real run, swap in your own aCRF/blank-CRF PDF path
-anywhere below.
+`build()` makes the annotated fixture and `build_second_study()` a second study,
+used by the cross-form tests.
 
 ## 3. Run the test suite
 
@@ -35,8 +46,24 @@ anywhere below.
 .venv/bin/python -m pytest -q
 ```
 
-Tests are one file per module (`tests/test_<module>.py`), all reading the
-synthetic fixture — no network, no external services.
+Tests are one file per module (`tests/test_<module>.py`), plus
+`tests/test_msg_fidelity.py`, which scores the whole pipeline against the MSG
+pair. No network, no external services.
+
+### Scoring a run
+
+```bash
+# the scorecard: recall, precision, placement error, colour/font/size
+.venv/bin/python scripts/score_msg.py -v
+
+# the same run, broken down by scope, page and cause
+.venv/bin/python scripts/diagnose_msg.py --page 6
+```
+
+The number to move is `median_distance_pt`, with recall held up — placing three
+annotations perfectly and losing two hundred is not an improvement. Every
+threshold in the parser is a named constant at the top of its module, and this
+is how you find out what changing one costs.
 
 ## 4. The CLI
 
@@ -71,7 +98,7 @@ review back** (the actual working loop). Both go through the same CLI.
 ### 5a. Parse an annotated study → build history
 
 ```bash
-.venv/bin/python -m acrf_parser data/sample_acrf.pdf -o output --db output/kb.sqlite
+.venv/bin/python -m acrf_parser data/blankcrf_annotated.pdf -o output --db output/kb.sqlite
 ```
 
 Runs phases 1–8 (extraction → layout → forms → fields → annotations →
@@ -79,8 +106,8 @@ linking → template) and writes:
 
 | Artifact | Phase | What it is |
 |---|---|---|
-| `output/sample_acrf.extract.json` | 1–6 | full parsed document: pages, forms, fields, annotations, links |
-| `output/sample_acrf.template.json` | 8 | coordinate-free template (form/field → variable), reusable across studies |
+| `output/blankcrf_annotated.extract.json` | 1–6 | full parsed document: pages, forms, fields, annotations, links |
+| `output/blankcrf_annotated.template.json` | 8 | coordinate-free template (form/field → variable), reusable across studies |
 | `output/kb.sqlite` | 7 | SQLite knowledge base: forms, fields, annotations, links for this study |
 
 Run it again on a second study with `--db output/kb.sqlite` and the KB
@@ -179,21 +206,26 @@ effectively irreversible — a KB write is not automatically undone).
 ## 6. One-shot end-to-end example
 
 ```bash
-# fresh fixture
-.venv/bin/python tests/sample_pdf.py
-
 # 1. ingest the annotated study into a corpus
-.venv/bin/python -m acrf_parser data/sample_acrf.pdf -o output --db output/kb.sqlite
+.venv/bin/python -m acrf_parser data/blankcrf_annotated.pdf -o output --db output/kb.sqlite
 
-# 2. stage a blank CRF (here, reusing the same PDF for demo purposes —
-#    normally this is a different, unannotated study)
-.venv/bin/python -m acrf_parser data/sample_acrf.pdf -o output \
+# 2. stage the blank CRF against everything learned so far
+.venv/bin/python -m acrf_parser data/blankcrf.pdf -o output \
     --staging --corpus output/kb.sqlite
 
-# 3. hand-edit output/sample_acrf.staging.xlsx, save as reviewed.xlsx, then:
-.venv/bin/python -m acrf_parser data/sample_acrf.pdf -o output \
+# 3. hand-edit output/blankcrf.staging.xlsx, save as reviewed.xlsx, then:
+.venv/bin/python -m acrf_parser data/blankcrf.pdf -o output \
     --import-staging reviewed.xlsx --corpus output/kb.sqlite \
     --write-annotations --learn
+```
+
+Steps 1-3 with the review step done mechanically are exactly what
+`scripts/score_msg.py` runs, so if you want to see the finished output without
+opening Excel:
+
+```bash
+.venv/bin/python scripts/score_msg.py --keep output/msg_run
+# output/msg_run/staging.xlsx, approved.xlsx and written.pdf
 ```
 
 ## 7. Working from Python instead of the CLI
@@ -204,7 +236,7 @@ intermediate state without going through files:
 ```python
 from acrf_parser import parse_pdf, build_kb, KnowledgeBase, build_template, apply_template
 
-doc = parse_pdf("data/sample_acrf.pdf")     # phases 1-6, in memory
+doc = parse_pdf("data/blankcrf_annotated.pdf")     # phases 1-6, in memory
 build_kb(doc, "output/kb.sqlite")           # phase 7
 template = build_template(doc)              # phase 8
 ```
@@ -233,6 +265,6 @@ and the **Phases** checklist for what each of the 11 phases does.
 
 ## 9. Cleaning up generated artifacts
 
-Everything under `output/` and `data/sample_acrf.pdf` /
+Everything under `output/` and `data/blankcrf_annotated.pdf` /
 `data/sample_second_study.pdf` is regenerable — safe to delete and re-run
 the commands above. Nothing in `acrf_parser/` or `tests/` is generated.

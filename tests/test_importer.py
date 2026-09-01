@@ -55,10 +55,13 @@ def _geom_row(wb, row_id, seq=1):
     raise AssertionError(f"no geometry row for {row_id}#{seq}")
 
 
-# The blank CRF has 14 fields, and one form-header row per page that belongs to
-# a form. Counts here are fields + form rows, never fields alone.
-FIELD_ROWS, FORM_ROWS = 14, 5
+# The blank CRF has 14 fields, and one form row per statement its forms carry in
+# their own right - the page domain headers, plus the two annotations on page 1
+# that reach no field. Counts here are fields + form rows, never fields alone.
+FIELD_ROWS, FORM_ROWS = 14, 7
 ALL_ROWS = FIELD_ROWS + FORM_ROWS
+# Form rows history can answer outright - see the note in tests/test_staging.py.
+FORM_AUTO = 5
 
 
 def test_a_clean_return_imports_whole(returned, blank_doc):
@@ -66,7 +69,7 @@ def test_a_clean_return_imports_whole(returned, blank_doc):
     report = _read(path, blank_doc)
     assert len(report.rows) == ALL_ROWS
     # 9 field rows plus every page's form header, which history also answered
-    assert len(report.approved()) == 9 + FORM_ROWS
+    assert len(report.approved()) == 9 + FORM_AUTO
     assert not report.errors
 
 
@@ -95,7 +98,7 @@ def test_one_bad_row_does_not_block_the_others(returned, blank_doc, tmp_path):
     report = _read(broken, blank_doc)
     blocked = report.blocked()
     assert [r.row_id for r in blocked] == ["p1f0"]
-    assert len(report.approved()) == 8 + FORM_ROWS   # everything else imports
+    assert len(report.approved()) == 8 + FORM_AUTO   # everything else imports
 
 
 # --- identity --------------------------------------------------------------
@@ -340,7 +343,7 @@ def test_the_report_counts_annotations_and_fields_separately(returned, blank_doc
     d = _read(out, blank_doc).to_dict()
     assert d["rows"] == ALL_ROWS + 1 and d["fields"] == FIELD_ROWS
     assert d["form_rows"] == FORM_ROWS
-    assert d["multi_annotation_fields"] == 1 and d["approved"] == 10 + FORM_ROWS
+    assert d["multi_annotation_fields"] == 1 and d["approved"] == 10 + FORM_AUTO
 
 
 def test_a_workbook_without_the_seq_column_still_imports(returned, blank_doc, tmp_path):
@@ -354,7 +357,12 @@ def test_a_workbook_without_the_seq_column_still_imports(returned, blank_doc, tm
     wb.save(out)
     report = _read(out, blank_doc)
     assert not report.errors
-    assert len(report.rows) == ALL_ROWS and {r.annot_seq for r in report.rows} == {1}
+    assert len(report.rows) == ALL_ROWS
+    # Without the column every row reads as seq 1 - so the three rows of page
+    # one's anchor are numbered for it, in the order they appear, with the
+    # IMPLIED_SEQ warning that says so.
+    assert {r.annot_seq for r in report.rows if r.row_id != "p1h"} == {1}
+    assert [r.annot_seq for r in report.rows_for("p1h")] == [1, 2, 3]
     assert all(r.geometry for r in report.rows)
 
 
@@ -376,8 +384,9 @@ def test_report_summary(returned, blank_doc):
     path, _, _, _ = returned
     d = _read(path, blank_doc).to_dict()
     assert d["rows"] == ALL_ROWS and d["blocked"] == 0
-    assert d["approved"] == 9 + FORM_ROWS and d["form_rows_approved"] == FORM_ROWS
-    assert d["by_status"] == {"APPROVED": 9 + FORM_ROWS, "NEEDS_MAPPING": 5}
+    assert d["approved"] == 9 + FORM_AUTO and d["form_rows_approved"] == FORM_AUTO
+    assert d["by_status"] == {"APPROVED": 9 + FORM_AUTO, "NEEDS_MAPPING": 5,
+                              "NEEDS_REVIEW": 2}
 
 
 def test_review_copy_puts_the_problem_in_the_row(returned, blank_doc, tmp_path):
@@ -400,5 +409,5 @@ def test_importing_without_the_source_pdf_still_validates(returned):
     """`doc` is optional: content checks work standalone, identity checks need it."""
     path, _, _, _ = returned
     report = read_staging(path)
-    assert len(report.rows) == ALL_ROWS and len(report.approved()) == 9 + FORM_ROWS
+    assert len(report.rows) == ALL_ROWS and len(report.approved()) == 9 + FORM_AUTO
     assert not any(i.code == "MISSING_ROW" for i in report.issues)

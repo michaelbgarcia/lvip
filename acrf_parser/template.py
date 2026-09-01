@@ -162,13 +162,60 @@ def relative_label(a: Annotation, fld: Field) -> str:
     Row alignment decides first: aCRF markup is overwhelmingly placed beside its
     field, and "right_of_field" survives a re-flow that any coordinate would not.
     """
-    if a.bbox.v_overlap(fld.bbox) > 0:
-        if a.bbox.x0 >= fld.bbox.x1:
+    box = a.bbox if hasattr(a, "bbox") else a
+    fbox = fld.bbox if hasattr(fld, "bbox") else fld
+    if box.v_overlap(fbox) > 0:
+        if box.x0 >= fbox.x1:
             return RIGHT_OF
-        if a.bbox.x1 <= fld.bbox.x0:
+        if box.x1 <= fbox.x0:
             return LEFT_OF
         return OVERLAPS
-    return BELOW if a.bbox.cy > fld.bbox.cy else ABOVE
+    return BELOW if box.cy > fbox.cy else ABOVE
+
+
+# --- placement: one definition, and its exact inverse ----------------------
+#
+# An annotation's position relative to its field is written down as a label plus
+# two offsets, and read back by the writer to work out where to draw the box.
+# Those two halves have to be inverses of each other, and for a long time they
+# were not: the offsets were always recorded as (annotation.x0 - field.x1,
+# annotation.cy - field.cy), while the writer interpreted them differently for
+# each label - measuring `left_of_field` from the field's *left* edge, and
+# ignoring the horizontal offset altogether for `above_field` and `below_field`.
+#
+# The consequence was invisible and expensive. Only `right_of_field` markup came
+# back where it had been; everything else was reconstructed by arithmetic that
+# did not match the arithmetic that produced it, and landed tens of points away
+# with nothing in the report to say so.
+#
+# So the pair lives here, next to the label they depend on, and every producer of
+# an offset (`style`, `kb`, `prefill`) calls `placement_of` while the one consumer
+# (`writer._anchor`) calls `anchor_from`. The reference point moves with the
+# label - the edge the label is *about* - which is what makes the offsets small
+# and stable in every direction rather than only to the right.
+
+
+def placement_of(box, fbox, w: float, h: float) -> tuple[str, float, float]:
+    """(label, offset_x_pct, offset_y_pct) describing where `box` sits by `fbox`.
+
+    The exact inverse of `writer.anchor_from`: feeding this back reproduces the
+    annotation's own left edge and vertical centre, whatever the label.
+    """
+    label = relative_label(box, fbox)
+    w, h = w or 1.0, h or 1.0
+    if label == LEFT_OF:
+        dx = box.x1 - fbox.x0          # negative: the box ends before the label
+    elif label == RIGHT_OF:
+        dx = box.x0 - fbox.x1
+    else:
+        dx = box.x0 - fbox.x0
+    if label == ABOVE:
+        dy = box.cy - fbox.y0          # negative: above the top edge
+    elif label == BELOW:
+        dy = box.cy - fbox.y1
+    else:
+        dy = box.cy - fbox.cy
+    return label, round(dx / w, 4), round(dy / h, 4)
 
 
 def save_template(template: dict, path: str | Path, indent: int = 2) -> Path:

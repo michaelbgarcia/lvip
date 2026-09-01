@@ -175,9 +175,17 @@ class ImportReport:
                       key=lambda r: r.annot_seq)
 
     def multi_annotation_fields(self) -> dict[str, int]:
-        """field -> how many annotations it carries, for fields carrying several."""
+        """field -> how many annotations it carries, for fields carrying several.
+
+        Fields only. A page's anchor routinely carries several statements - the
+        domain header plus every piece of markup that reached no field - and that
+        is the ordinary shape of the form-level layer, not the notable thing this
+        reports. `WriteReport.multi_annotation_fields` scopes it the same way.
+        """
         counts: dict[str, int] = {}
         for r in self.rows:
+            if r.scope == FORM_SCOPE:
+                continue
             counts[r.row_id] = counts.get(r.row_id, 0) + 1
         return {k: v for k, v in sorted(counts.items()) if v > 1}
 

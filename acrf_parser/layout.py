@@ -187,22 +187,46 @@ def _hint_zones(page: Page) -> None:
 
 # --- 3. line grouping (the wrapped-text fix) -------------------------------
 def group_lines(page: Page) -> list[TextGroup]:
-    """Merge rendered lines back into logical labels, one group per label."""
-    groups: list[TextGroup] = []
+    """Merge rendered lines back into logical labels, one group per label.
+
+    Each line joins the *best open group* it is mergeable with, rather than only
+    the group being built at that moment. The difference shows up wherever one
+    column band holds several stacked labels side by side - which is every table
+    header on a CRF log form:
+
+        Number of          Date Tablets Returned     Number of Tablets
+        Tablets                                      Returned
+        Dispensed
+
+    Read in y-then-x order those arrive interleaved, so a strictly sequential
+    scan meets "Date Tablets Returned" between "Number of" and "Tablets" and
+    closes the group - and "Number of Tablets Dispensed" comes out as three
+    unrelated fields, each of which then keys separately and can be mistaken for
+    the page's title. Choosing among the open groups costs nothing in the common
+    single-column case, where there is only ever one to choose from.
+
+    Over-merging is held off by `_mergeable`, which is unchanged and is a
+    conjunction: same region, same column, no ruled separator, matching size and
+    weight, line pitch within half a font size, and horizontal overlap. Ties go
+    to the group whose last line overlaps this one most - the column it is
+    actually under.
+    """
     anchors = _anchor_ids(page)
     lines = sorted((l for l in page.lines if l.text.strip()),
                    key=lambda l: (l.column if l.column is not None else -1, l.bbox.y0, l.bbox.x0))
-    current: list[TextLine] = []
+    open_groups: list[list[TextLine]] = []
     for line in lines:
-        if current and _mergeable(current[-1], line, page, anchors):
-            current.append(line)
+        hosts = [g for g in open_groups if _mergeable(g[-1], line, page, anchors)]
+        if hosts:
+            max(hosts, key=lambda g: (g[-1].bbox.h_overlap(line.bbox),
+                                      -abs(g[-1].bbox.y1 - line.bbox.y0))).append(line)
         else:
-            if current:
-                groups.append(_make_group(current, page, len(groups)))
-            current = [line]
-    if current:
-        groups.append(_make_group(current, page, len(groups)))
-    return groups
+            open_groups.append([line])
+    # Back into reading order: the groups are built in whatever order their first
+    # lines arrived, and everything downstream expects page order.
+    open_groups.sort(key=lambda g: (g[0].column if g[0].column is not None else -1,
+                                    g[0].bbox.y0, g[0].bbox.x0))
+    return [_make_group(g, page, i) for i, g in enumerate(open_groups)]
 
 
 def _mergeable(a: TextLine, b: TextLine, page: Page, anchors: set[int] | None = None) -> bool:

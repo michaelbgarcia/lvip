@@ -118,3 +118,43 @@ def test_source_records_which_signal_named_the_form(doc):
     assert [f.source for f in doc.forms] == [
         forms.TITLE_LINE, forms.TITLE_LINE, forms.DOMAIN_ANNOTATION, forms.TITLE_LINE]
     assert doc.page(4).form_source == forms.DOMAIN_ANNOTATION
+
+
+# --- against the real MSG CRF ----------------------------------------------
+# The fixture above prints "Form: Demographics" at the top of the page, which is
+# the easy case and the one this module was written against. A real CRF prints
+# the study identification band there instead, and the form's own name below it.
+def test_the_study_band_is_not_the_form_title(msg_run):
+    """Every page of the MSG CRF opens with "CDISC Study CDISC01", set bold,
+    above and to the left of the form's own name. Taking the topmost bold
+    heading named all 22 pages after the study."""
+    assert msg_run.blank.page(6).form_name == "DEMOGRAPHY"
+    assert msg_run.blank.page(8).form_name == "MEDICAL AND SURGICAL HISTORY"
+    assert not any("CDISC01" in p.form_name for p in msg_run.blank.pages)
+
+
+def test_a_form_named_study_something_is_still_a_form(msg_run):
+    """"Study" heads the identification band and also starts a real form name.
+
+    What separates them is what follows: an identifier carries a code, a title
+    carries a word.
+    """
+    assert msg_run.blank.page(19).form_name == "STUDY MEDICATION INVENTORY"
+
+
+def test_page_n_of_m_is_a_continuation_marker(msg_run):
+    """"CORNELL SCALE ... (CSDD) (PAGE 2 OF 2)" is one form over two pages."""
+    names = [msg_run.blank.page(n).form_name for n in (14, 15)]
+    assert names[0] == names[1] and names[0].startswith("CORNELL SCALE")
+    assert "PAGE" not in names[0].upper().split("(")[-1]
+
+
+def test_a_table_header_cell_is_not_a_title(msg_run):
+    """Bold, short and centred describes a form title and also every cell of a
+    table's header row. What separates them is that a title is alone on its line."""
+    assert msg_run.blank.page(19).form_name != "Number of Tablets Dispensed"
+
+
+def test_an_instruction_line_is_not_a_title(msg_run):
+    """Centred, bold, near the top - and forty words long."""
+    assert not msg_run.blank.page(14).form_name.startswith("Instructions")

@@ -12,11 +12,26 @@ type of any annotation can be explained from `type_evidence` alone:
     DOMAIN_HEADER        DM=Demographics
     VARIABLE             BRTHDTC / DM.BRTHDTC
     CONSTANT_ASSIGNMENT  MHENRF=ONGOING
+    CONDITIONAL_VARIABLE IEORRES when IETESTCD = INCL01
     SUPP_QUALIFIER       RACEOTH when SUPPDM.QNAM=RACEOTH
     NOT_SUBMITTED        [NOT SUBMITTED]
     CROSS_REFERENCE      See Page 7
     DERIVATION_RULE      AGE derived from BRTHDTC and RFSTDTC
     NOTE                 anything else - free prose, kept, never guessed at
+
+`CONDITIONAL_VARIABLE` is how every SDTM findings domain is annotated, and it
+was the largest gap here. A findings observation is not identified by its
+variable - `QSORRES` is *every* answer on a questionnaire - but by the variable
+plus the test code that says which question it is, so an annotator writes
+`QSORRES when QSTESTCD = MMSEA1`. On the CDISC MSG example CRF that shape
+accounts for seventy of two hundred and nine annotations, a third of the file,
+and all seventy read as unclassified prose: no variable parsed, no domain
+resolved, so no fill colour, no domain check, and `NOTE` shown to the reviewer
+for the one thing on the page that is completely structured.
+
+It is checked after SUPP and before assignment. `RACEOTH when SUPPDM.QNAM =
+RACEOTH` has the same shape and is the more specific case, and an assignment
+pattern anchored at the start of the string cannot match a conditional anyway.
 
 Order matters and runs most-specific first: "SUPPDS.QVAL when QNAM = "PROTVER""
 contains an `=` and would read as a constant assignment if the SUPP test did not
@@ -38,6 +53,7 @@ from .models import Annotation, AnnotationPart, Page
 DOMAIN_HEADER = "DOMAIN_HEADER"
 VARIABLE = "VARIABLE"
 CONSTANT_ASSIGNMENT = "CONSTANT_ASSIGNMENT"
+CONDITIONAL_VARIABLE = "CONDITIONAL_VARIABLE"
 SUPP_QUALIFIER = "SUPP_QUALIFIER"
 NOT_SUBMITTED = "NOT_SUBMITTED"
 CROSS_REFERENCE = "CROSS_REFERENCE"
@@ -60,6 +76,8 @@ _SEE_PAGE = re.compile(r"\bsee\s+(?:page|pg\.?)\s*(\d+)", re.I)
 _SUPP = re.compile(r"\bSUPP(?P<dom>[A-Z]{2})?\b|\bQNAM\b", re.I)
 _SUPP_VAR = re.compile(rf"SUPP[A-Z]{{2}}\.(?P<var>{_VAR_TOKEN})", re.I)
 _QNAM_VALUE = re.compile(r"QNAM\s*=\s*[\"']?(?P<qnam>[A-Z][A-Z0-9_]*)[\"']?", re.I)
+# "RACEOTH in SUPPDM": the qualifier variable, then the dataset it lands in.
+_SUPP_IN = re.compile(rf"^\s*(?P<var>{_VAR_TOKEN})\s+in\s+SUPP(?P<dom>[A-Z]{{2}})\s*$", re.I)
 _ASSIGNMENT = re.compile(rf"^\s*{_QUALIFIED}\s*=\s*(?P<value>.+?)\s*$")
 _PURE_VAR = re.compile(rf"^\s*{_QUALIFIED}\s*$")
 _VAR_LIST = re.compile(rf"^\s*{_VAR_TOKEN}(?:\.{_VAR_TOKEN})?"
@@ -69,6 +87,20 @@ _DERIVATION = re.compile(
     r"populated\s+(?:from|by)|mapped\s+(?:to|from)|if\b.*\bthen\b|not\s+collected)\b", re.I)
 _CODED_VALUE = re.compile(r"^[\"']?[A-Z0-9][A-Z0-9 _\-/]*[\"']?$")
 _SPLIT = re.compile(r"\s*[,/|]\s*|\s+")
+
+# "IEORRES when IETESTCD = INCL01", "VSORRES / VSORRESU when VSTESTCD = SYSBP,
+# DIABP". One or more variables, a condition variable, and the value(s) that
+# pick out which observation this is.
+_VAR_SEQ = rf"(?:[A-Z]{{2}}\.)?{_VAR_TOKEN}"
+_CONDITIONAL = re.compile(
+    rf"^\s*(?P<vars>{_VAR_SEQ}(?:\s*[/,]\s*{_VAR_SEQ})*)"
+    rf"\s+[Ww][Hh][Ee][Nn]\s+(?P<cond>{_VAR_SEQ})\s*=\s*(?P<vals>\S.*?)\s*$")
+# `when` written hard against the variable before it - "QSORRESwhen QSTESTCD =
+# CSDD19". Two of the MSG CRF's annotations are typed that way and they are as
+# structured as the rest; a parser that only reads tidy input reports the
+# annotator's typo as prose.
+_TIGHT_WHEN = re.compile(r"(?<=[A-Z])(?=[Ww][Hh][Ee][Nn]\s)")
+_VALUE_SPLIT = re.compile(r"\s*[,/]\s*")
 
 CONF_STRUCTURAL = 0.95   # the pattern is unambiguous
 CONF_LIKELY = 0.8
@@ -132,7 +164,7 @@ def classify(text: str, first: bool = False) -> AnnotationPart:
     t = (text or "").strip()
     part = AnnotationPart(text=t)
     for rule in (_as_not_submitted, _as_cross_reference, _as_supp_qualifier,
-                 _as_assignment, _as_derivation, _as_variable):
+                 _as_conditional, _as_assignment, _as_derivation, _as_variable):
         hit = rule(t, first)
         if hit:
             part.annot_type, part.confidence, part.parsed, part.evidence = hit
@@ -172,19 +204,72 @@ def _as_supp_qualifier(t: str, first: bool):
         ev.append(f"QNAM={parsed['qnam']}")
     lead = _PURE_VAR.match(t.split(" when ")[0].strip())
     supp_var = _SUPP_VAR.search(t)
+    # "RACEOTH in SUPPDM" - the shorthand the MSG CRF uses throughout, and the
+    # only one of the three shapes where the variable is not otherwise readable.
+    in_supp = _SUPP_IN.match(t)
     if lead:                        # "RACEOTH when SUPPDM.QNAM=RACEOTH"
         parsed["variable"] = lead.group("var")
         ev.append(f"qualifier variable {parsed['variable']}")
     elif supp_var:                  # "SUPPDS.QVAL when QNAM = "PROTVER""
         parsed["variable"] = supp_var.group("var").upper()
         ev.append(f"qualifier variable {parsed['variable']}")
+    elif in_supp:                   # "RACEOTH in SUPPDM"
+        parsed["variable"] = in_supp.group("var")
+        # The variable *is* the QNAM in this shorthand: "RACEOTH in SUPPDM" says
+        # a SUPPDM record whose QNAM is RACEOTH. Saying so is what lets the
+        # importer and the corpus treat it like the longhand spelling.
+        parsed.setdefault("qnam", in_supp.group("var"))
+        ev.append(f"qualifier variable {parsed['variable']} in SUPP{parsed.get('domain', '')}")
     conf = CONF_STRUCTURAL if qnam else CONF_LIKELY
     return SUPP_QUALIFIER, conf, parsed, ev
 
 
+def _as_conditional(t: str, first: bool):
+    """`XXORRES when XXTESTCD = CODE`: a findings observation, named by its test.
+
+    The variable alone does not identify the observation - every answer on a
+    questionnaire is `QSORRES` - so the test code is part of the mapping and has
+    to be parsed as such rather than left in prose. `variable` is the first one,
+    which is what the workbook's variable column wants; `variables` is all of
+    them, because `VSORRES / VSORRESU when VSTESTCD = HEIGHT` maps two.
+    """
+    m = _CONDITIONAL.match(_TIGHT_WHEN.sub(" ", t))
+    if not m:
+        return None
+    variables = [v.strip() for v in re.split(r"\s*[/,]\s*", m.group("vars")) if v.strip()]
+    values = [v.strip().strip("\"'") for v in _VALUE_SPLIT.split(m.group("vals")) if v.strip()]
+    cond = m.group("cond")
+    parsed = {"variable": variables[0], "variables": variables,
+              "condition": {"variable": cond, "values": values}}
+    domain, _how = _prefix_domain(variables[0])
+    if domain:
+        parsed["domain"] = domain
+    ev = [f"{', '.join(variables)} conditioned on {cond} = {', '.join(values)}"]
+    # Both sides naming the same domain is the SDTM findings convention itself -
+    # QSORRES with QSTESTCD - and it is what separates this from a stray "when".
+    same = _prefix_domain(cond)[0] == domain and domain
+    if same:
+        ev.append(f"variable and test code both in domain {domain}")
+    return (CONDITIONAL_VARIABLE, CONF_STRUCTURAL if same else CONF_LIKELY, parsed, ev)
+
+
+def _prefix_domain(var: str) -> tuple[str, str]:
+    """The domain a variable's prefix names, if it names one. ("", "") if not."""
+    var = (var or "").upper().split(".")[-1]
+    prefix, rest = var[:2], var[2:]
+    if prefix in DOMAINS and _DOMAIN_SUFFIX.match(rest):
+        return prefix, PREFIX
+    return "", UNRESOLVED
+
+
 def _as_assignment(t: str, first: bool):
-    """`LHS = RHS`: a domain header or a constant assignment, never both."""
-    m = _ASSIGNMENT.match(t)
+    """`LHS = RHS`: a domain header or a constant assignment, never both.
+
+    The left side may be a list. `DSTERM / DSDECOD = RANDOMIZED` assigns one
+    constant to two variables, which is ordinary annotator shorthand and read as
+    prose while this only accepted a single token.
+    """
+    m = _ASSIGNMENT.match(t) or _list_assignment(t)
     if not m:
         return None
     lhs, dom, value = m.group("var"), m.group("dom"), m.group("value").strip()
@@ -197,6 +282,35 @@ def _as_assignment(t: str, first: bool):
     return (CONSTANT_ASSIGNMENT, CONF_STRUCTURAL,
             {"variable": lhs, "value": _unquote(value)},
             [f"variable {lhs} assigned constant {value!r}"])
+
+
+_LIST_ASSIGNMENT = re.compile(
+    rf"^\s*(?P<vars>{_VAR_SEQ}(?:\s*[/,]\s*{_VAR_SEQ})+)\s*=\s*(?P<value>.+?)\s*$")
+
+
+def _list_assignment(t: str):
+    """`DSTERM / DSDECOD = RANDOMIZED` as if it were `DSTERM = RANDOMIZED`.
+
+    Returned in the shape `_ASSIGNMENT` produces so the caller does not have to
+    care which matched; the first variable is the one it reports, which is the
+    same choice `_as_conditional` makes for the same reason.
+    """
+    m = _LIST_ASSIGNMENT.match(t)
+    if not m:
+        return None
+    first_var = re.split(r"\s*[/,]\s*", m.group("vars"))[0]
+    dom, _, var = first_var.rpartition(".")
+    return _FakeMatch({"var": var, "dom": dom or None, "value": m.group("value")})
+
+
+class _FakeMatch:
+    """Just enough of a match object for `_as_assignment` to read groups off."""
+
+    def __init__(self, groups: dict):
+        self._groups = groups
+
+    def group(self, name: str):
+        return self._groups.get(name)
 
 
 def _two_letter_assignment(code: str, value: str, first: bool):

@@ -37,7 +37,59 @@ _DA_CMYK = re.compile(r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+k\b", re.I)
 _NUMBER = re.compile(r"^[-+]?(?:\d+\.?\d*|\.\d+)$")
 _FILL_OPS = {"f", "F", "f*", "b", "b*", "B", "B*"}   # ops that paint an interior
 _PATH_END_OPS = {"n", "S", "s", "W", "W*"}           # path discarded or clipped/stroked
+_SHOW_TEXT_OPS = {"Tj", "TJ", "'", '"'}              # ops that paint glyphs
 _FILL_MIN_COVER = 0.5   # a fill smaller than half the box is decoration, not background
+
+# Annotation subtypes that are review apparatus rather than markup on the page.
+# A `Text` annotation is a sticky note - the little icon a reviewer leaves in
+# Acrobat - and `Popup` is the balloon that opens from one. Neither renders as
+# part of the form, and the MSG example CRF carries four ("Accepted set by Me",
+# "MigrationConfirmed set by Me") left behind by whoever signed it off. Read as
+# markup they became four annotations of a form, four staging rows to review and
+# four boxes drawn onto the next study's CRF.
+_NOT_MARKUP = frozenset({"Text", "Popup", "Link", "FileAttachment", "Sound",
+                         "Movie", "Screen", "PrinterMark", "TrapNet", "Watermark"})
+# Subtypes whose entire content is the text they carry, so an empty one is
+# empty. A Square or a Highlight says what it says by where it is.
+_TEXT_BEARING = frozenset({"FreeText"})
+
+
+def page_size(page: pymupdf.Page) -> tuple[float, float]:
+    """The page's size as a reader sees it - `page.rect`, rotation applied.
+
+    Everything in this parser works in *display* coordinates (see
+    `display_matrix`), so this is the size those coordinates are expressed in: a
+    landscape CRF page is 792 wide and 612 tall, whatever its media box says.
+    """
+    rect = page.rect
+    return round(rect.width, 2), round(rect.height, 2)
+
+
+def display_matrix(page: pymupdf.Page) -> pymupdf.Matrix | None:
+    """The transform from PDF page space into reading order, or None if identity.
+
+    A landscape CRF page is usually a portrait page carrying `/Rotate 90`, and
+    PyMuPDF gives out two different coordinate systems for it. `page.rect` is
+    what a reader displays - 792x612 - but every coordinate the library hands
+    back or takes in is in the *unrotated* page space: `get_text` puts words at
+    y=750 on a page `rect` calls 612 tall, `annot.rect` agrees with those words,
+    and `add_freetext_annot` places a box by them too.
+
+    That is not a cosmetic difference, because this whole parser reasons in
+    reading order. "Same row" is vertical overlap, columns are found by cutting
+    on vertical whitespace, a title lives in the top third of the page, a
+    wrapped line is the one below its predecessor. On a quarter-turned page in
+    raw coordinates, *rows run down the x axis*: three of the MSG CRF's 22 pages
+    are like that, and on them every one of those tests asks its question about
+    the wrong axis. It is why "Reason for Discontinuation" came back as three
+    unrelated fragments and why those pages yielded no fields at all.
+
+    Rotating once, here, is what keeps the rest of the pipeline free of it: no
+    module below Phase 1 has to know a page can be turned. `Page.rotation` still
+    records the quarter turn, and `writer` inverts this matrix on the way out
+    because `add_freetext_annot` wants page space back.
+    """
+    return page.rotation_matrix if page.rotation % 360 else None
 
 
 class ACRFParser:
@@ -48,6 +100,16 @@ class ACRFParser:
         if not self.path.exists():
             raise FileNotFoundError(self.path)
         self.document: Document | None = None
+        # Set per page. Every box this class produces goes through `_box`, so a
+        # quarter-turned page is rotated into reading order exactly once and no
+        # later phase has to know it was turned - see `display_matrix`.
+        self._matrix: pymupdf.Matrix | None = None
+
+    def _box(self, rect) -> BBox:
+        """One extracted rectangle, in display coordinates."""
+        if self._matrix is None:
+            return BBox.of(rect)
+        return BBox.of(pymupdf.Rect(rect) * self._matrix)
 
     # ---- main entry point -------------------------------------------------
     def parse_pdf(self) -> Document:
@@ -72,11 +134,12 @@ class ACRFParser:
 
     # ---- per-page work ----------------------------------------------------
     def _parse_page(self, page: pymupdf.Page) -> Page:
-        rect = page.rect
+        self._matrix = display_matrix(page)
+        w, h = page_size(page)
         out = Page(
             number=page.number + 1,          # 1-based, matches "See Page 7"
-            width=round(rect.width, 2),
-            height=round(rect.height, 2),
+            width=w,
+            height=h,
             rotation=page.rotation,
             text=page.get_text("text"),
         )
@@ -102,10 +165,11 @@ class ACRFParser:
         """
         rules: list[Rule] = []
         controls: list[Control] = []
-        w, h = page.rect.width or 1.0, page.rect.height or 1.0
+        pw, ph = page_size(page)
+        w, h = pw or 1.0, ph or 1.0
         annot_rects = [a.bbox for a in annotations]
         for d in page.get_drawings():
-            box = BBox.of(d["rect"])
+            box = self._box(d["rect"])
             if any(box.inside_frac(r) >= _ANNOT_COVER for r in annot_rects):
                 continue
             kinds = {it[0] for it in d.get("items", [])}
@@ -117,7 +181,7 @@ class ACRFParser:
                 kind = "CIRCLE" if "c" in kinds else "BOX"
                 controls.append(Control(page.number + 1, box, kind))
         for wd in page.widgets():    # AcroForm fields; annots() excludes these
-            controls.append(Control(page.number + 1, BBox.of(wd.rect), "WIDGET",
+            controls.append(Control(page.number + 1, self._box(wd.rect), "WIDGET",
                                     widget_type=str(wd.field_type_string or ""),
                                     field_name=str(wd.field_name or "")))
         return rules, controls
@@ -146,7 +210,7 @@ class ACRFParser:
         for b in data.get("blocks", []):
             if b.get("type") != 0:           # 0 = text, 1 = image
                 continue
-            tb = TextBlock(text="", bbox=BBox.of(b["bbox"]), page=page.number + 1,
+            tb = TextBlock(text="", bbox=self._box(b["bbox"]), page=page.number + 1,
                            block_no=b["number"])
             for ln, line in enumerate(b.get("lines", [])):
                 spans = line.get("spans", [])
@@ -155,7 +219,7 @@ class ACRFParser:
                     continue
                 lead = max(spans, key=lambda s: len(s.get("text", "")), default={})
                 tl = TextLine(
-                    text=text, bbox=BBox.of(line["bbox"]), page=page.number + 1,
+                    text=text, bbox=self._box(line["bbox"]), page=page.number + 1,
                     block_no=b["number"], line_no=ln,
                     size=round(lead.get("size", 0.0), 2),
                     font=lead.get("font", ""),
@@ -171,7 +235,7 @@ class ACRFParser:
     def _words(self, page: pymupdf.Page) -> list[Word]:
         """Word-level layout - the finest grain available for row/column logic."""
         return [
-            Word(text=w[4], bbox=BBox.of(w[:4]), page=page.number + 1,
+            Word(text=w[4], bbox=self._box(w[:4]), page=page.number + 1,
                  block_no=int(w[5]), line_no=int(w[6]), word_no=int(w[7]))
             for w in page.get_text("words", sort=True)
         ]
@@ -181,23 +245,42 @@ class ACRFParser:
         annots: list[Annotation] = []
         fallback = self._acroform_da(page.parent)
         for a in page.annots():
+            subtype = a.type[1] if a.type else ""
+            if subtype in _NOT_MARKUP:
+                continue                 # a reviewer's sticky note, not the form's
             info = a.info or {}
             content = clean(info.get("content", ""))
             text = content or self._annot_appearance_text(a)
+            painted = self._appearance_text_color(page.parent, a.xref)
+            if not text and subtype in _TEXT_BEARING:
+                # A FreeText box with no text in it, in /Contents or in its own
+                # appearance stream. Text is the whole of what a FreeText says,
+                # so an empty one cannot be classified, linked, staged or drawn -
+                # every later phase already treats it as nothing - and carrying
+                # it only tells a reviewer the file holds more markup than it
+                # does. The MSG example CRF has three.
+                #
+                # Scoped to the text-bearing subtypes on purpose: a Square or a
+                # Highlight means something by *where* it is, and is expected to
+                # carry no text at all.
+                continue
             style = parse_da(self._annot_da(page.parent, a.xref) or fallback)
             fill, fill_source = self._annot_fill(page.parent, a)
             annots.append(Annotation(
                 page=page.number + 1,
                 text=text,
-                bbox=BBox.of(a.rect),
-                subtype=a.type[1] if a.type else "",
+                bbox=self._box(a.rect),
+                subtype=subtype,
                 author=clean(info.get("title", "")),
                 content=content,
                 title=clean(info.get("title", "")),
                 color=self._annot_color(a),
                 fill_color=fill,
                 fill_source=fill_source,
-                text_color=style["text_color"],
+                # What the page actually shows, falling back to what /DA claims.
+                # The two disagree more often than they should - see
+                # `_appearance_text_color`.
+                text_color=painted or style["text_color"],
                 font_name=style["font_name"],
                 font_size=style["font_size"],
                 xref=a.xref,
@@ -311,6 +394,46 @@ class ACRFParser:
                 area = 0.0
             ops = []
         return best[0] if best[1] / box_area >= _FILL_MIN_COVER else None
+
+    @classmethod
+    def _appearance_text_color(cls, pdf: pymupdf.Document, xref: int) -> tuple[float, ...] | None:
+        """The colour the annotation's glyphs are actually painted in.
+
+        `/DA` is supposed to say this, and on a real aCRF it frequently does not.
+        Every annotation on the CDISC MSG example CRF carries
+        `0 0 0 rg /Arial,BoldItalic 12 Tf`, and every variable on it is drawn in
+        red - the appearance stream sets `1 0 0 rg` after the /DA has had its
+        say, and the appearance stream is what a reader paints. Believing /DA
+        there means learning a house style of black text from a corpus that is
+        not black, and then drawing the next study's aCRF in the wrong colour.
+
+        So this reads the non-stroking colour in force at the first text-showing
+        operator, which is by construction the colour the text comes out. The
+        two rules together - appearance first, /DA second - are the same
+        precedence `_annot_fill` already applies to the background, and for the
+        same reason.
+        """
+        stream = cls._appearance_stream(pdf, xref)
+        if not stream:
+            return None
+        color: tuple[float, ...] | None = None
+        ops: list[float] = []
+        for tok in stream.split():
+            if _NUMBER.match(tok):
+                ops.append(float(tok))
+                continue
+            if tok == "rg" and len(ops) >= 3:
+                color = tuple(round(v, 3) for v in ops[-3:])
+            elif tok == "g" and ops:
+                v = round(ops[-1], 3)
+                color = (v, v, v)
+            elif tok == "k" and len(ops) >= 4:
+                c, m, y, k = ops[-4:]
+                color = tuple(round((1 - v) * (1 - k), 3) for v in (c, m, y))
+            elif tok in _SHOW_TEXT_OPS:
+                return color
+            ops = []
+        return None
 
     @staticmethod
     def _appearance_stream(pdf: pymupdf.Document, xref: int) -> str:

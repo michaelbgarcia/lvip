@@ -40,9 +40,14 @@ def approved(blank_doc, index, house, tmp_path_factory):
     return read_staging(out, blank_doc)
 
 
-# One form-header row per page of the blank CRF: five pages, five forms' worth
-# of markup that belongs to no field.
-FORM_ROWS = 5
+# Form-level markup on the blank CRF: one domain header per page that belongs to
+# a form, plus the two annotations on page 1 that reach no field at all. Markup
+# that reaches no field belongs to the form because nothing else will take it -
+# see `anchors` - and it is drawn where history drew it.
+FORM_ROWS = 7
+# Only five of them are AUTO, so only five are approved and drawn - see the note
+# in tests/test_staging.py. They land on four pages: page 1 carries three.
+FORM_AUTO, FORM_PAGES_DRAWN = 5, 3
 
 
 # --- the loop --------------------------------------------------------------
@@ -57,10 +62,10 @@ def test_written_annotations_survive_a_reparse(approved, blank_doc, tmp_path):
     out = tmp_path / "annotated.pdf"
     report = write_annotations(blank_doc.path, approved.rows, out)
     # 9 field annotations plus one form header per page, and nothing had to move.
-    assert len(report.placements) == 9 + FORM_ROWS and not report.adjusted
+    assert len(report.placements) == 9 + FORM_AUTO and not report.adjusted
 
     again = parse_pdf(out)
-    assert len(list(again.iter_annotations())) == 9 + FORM_ROWS
+    assert len(list(again.iter_annotations())) == 9 + FORM_AUTO
 
     linked = {l.field_id: again.annotation(l.annotation_id).text
               for l in again.links if not l.rejected}
@@ -73,7 +78,7 @@ def test_written_annotations_survive_a_reparse(approved, blank_doc, tmp_path):
     # was simply absent from the output, which no round trip could catch.
     headers = {a.text for a in again.form_annotations()}
     assert {"DM=Demographics", "MH=Medical History", "EL=Eligibility"} <= headers
-    assert len(again.form_annotations()) == FORM_ROWS
+    assert len(again.form_annotations()) == FORM_AUTO
     # Not DS=Disposition, and that is the blank CRF's known weakness rather than
     # this phase's: page 4 prints no title, so it inherits Medical History from
     # page 3 and history answers for the form it was told. `form_name` is
@@ -281,10 +286,20 @@ def test_a_set_wraps_only_when_its_row_runs_out(blank_doc, tmp_path):
 
 
 def test_an_unavailable_font_is_substituted_and_said_so(blank_doc, tmp_path):
+    """Reported in `notes`, not in `adjustments`.
+
+    A substitution is not a placement problem: nothing moved, and there is
+    nothing on the page for a reviewer to check. A corpus set in a house font
+    substitutes on every row, so counting those as adjustments would report a
+    hundred annotations needing a look when none of them do.
+    """
     row = _row("f", 0.3)
     row.font_name = "SponsorSans"
     report = write_annotations(blank_doc.path, [row], tmp_path / "font.pdf")
-    assert "font substituted for SponsorSans" in report.placements[0].adjustments
+    placement = report.placements[0]
+    assert placement.notes == ["font substituted for SponsorSans"]
+    assert not placement.adjustments and not report.adjusted
+    assert report.to_dict()["substituted_fonts"] == ["font substituted for SponsorSans"]
     assert parse_pdf(tmp_path / "font.pdf").page(1).annotations[0].text == "MHSTDTC"
 
 
@@ -307,9 +322,9 @@ def test_variable_alone_is_enough_to_draw(blank_doc, tmp_path):
 def test_report_summary(approved, blank_doc, tmp_path):
     report = write_annotations(blank_doc.path, approved.rows, tmp_path / "s.pdf")
     d = report.to_dict()
-    assert d["written"] == 9 + FORM_ROWS and d["skipped"] == 5 and d["adjusted"] == 0
-    assert d["fields"] == 9 and d["form_annotations"] == FORM_ROWS
-    assert d["pages_with_form_markup"] == FORM_ROWS
+    assert d["written"] == 9 + FORM_AUTO and d["adjusted"] == 0
+    assert d["fields"] == 9 and d["form_annotations"] == FORM_AUTO
+    assert d["pages_with_form_markup"] == FORM_PAGES_DRAWN
 
 
 def test_the_fill_from_history_lands_on_the_page(approved, blank_doc, tmp_path):

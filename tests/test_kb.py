@@ -24,9 +24,10 @@ def two_study_db(doc, second_doc, tmp_path):
 def test_everything_lands(db):
     assert db.stats() == {"documents": 1, "forms": 4, "fields": 14,
                           "annotations": 17, "links": 9, "mapped_keys": 9,
-                          # The domain headers: markup with no field to link to,
-                          # which is why it needs a count of its own.
-                          "form_annotations": 4}
+                          # Markup with no field to link to, which is why it
+                          # needs a count of its own: four domain headers, plus
+                          # the two annotations on page 1 that reach no field.
+                          "form_annotations": 6}
 
 
 def test_lookup_returns_the_variable(db):
@@ -139,6 +140,13 @@ def test_kb_migrates_an_older_database(tmp_path, doc):
     from acrf_parser import kb as kbmod
     path = tmp_path / "old.db"
     con = kbmod.connect(path)
+    # A database written before those columns existed also predates every view
+    # that reads them, so the views go first. SQLite refuses to drop a column a
+    # view still references, and leaving today's views in place would simulate a
+    # state no older corpus was ever in.
+    for (name,) in con.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'view'").fetchall():
+        con.execute(f"DROP VIEW IF EXISTS {name}")
     con.execute("ALTER TABLE annotations DROP COLUMN fill_color")
     con.execute("ALTER TABLE annotations DROP COLUMN fill_source")
     con.commit()

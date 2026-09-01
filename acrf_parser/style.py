@@ -26,7 +26,7 @@ from typing import Any, Iterable
 from . import annotations as ann
 from .models import Annotation, Document
 from .normalize import statement_key
-from .template import relative_label
+from .template import placement_of
 
 MIN_SAMPLES = 3          # below this, report the observation but trust it less
 LOW_AGREEMENT = 0.7      # flagged as unsettled: the corpus does not agree
@@ -278,10 +278,8 @@ def _placements(doc: Document) -> list[tuple[str, str, float, float]]:
         page = doc.page(link.page)
         if not (fld and annot and page):
             continue
-        w, h = page.width or 1.0, page.height or 1.0
-        out.append((annot.annot_type, relative_label(annot, fld),
-                    round((annot.bbox.x0 - fld.bbox.x1) / w, 4),
-                    round((annot.bbox.cy - fld.bbox.cy) / h, 4)))
+        label, dx, dy = placement_of(annot.bbox, fld.bbox, page.width, page.height)
+        out.append((annot.annot_type, label, dx, dy))
     return out
 
 

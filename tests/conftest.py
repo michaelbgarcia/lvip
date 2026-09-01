@@ -1,3 +1,20 @@
+"""Fixtures for both halves of the suite.
+
+Two bodies of evidence, doing different jobs.
+
+**The MSG pair** (`data/blankcrf_annotated.pdf` and `data/blankcrf.pdf`) is real
+annotator work: the CDISC SDTM Metadata Submission Guidelines example CRF, once
+annotated and once blank, the same 22 pages either way. It is the calibration
+set - every threshold in this parser should be answerable to it, and
+`test_msg_fidelity.py` scores the whole pipeline against it end to end.
+
+**The synthetic fixture** (`tests/sample_pdf.py`) is kept for the cases this one
+real CRF does not happen to contain: a study that colour-codes its markup by
+SDTM domain, two studies that disagree about what "Start Date" means, a page
+named by nothing but its domain-header annotation. Those situations are real,
+and a suite that only tested what the MSG pair exercises would stop covering
+them. Each retained synthetic test says which case it is holding.
+"""
 import sys
 from pathlib import Path
 
@@ -94,3 +111,30 @@ def index(corpus):
 def house(corpus):
     from acrf_parser.style import derive_house_style
     return derive_house_style(corpus)
+
+
+# --- the MSG pair ----------------------------------------------------------
+@pytest.fixture(scope="session")
+def msg_truth():
+    """The sponsor's own annotations, read straight off the annotated PDF."""
+    from tests.msg import ground_truth
+    return ground_truth()
+
+
+@pytest.fixture(scope="session")
+def msg_run(tmp_path_factory):
+    """One full pass over the MSG pair, with every intermediate kept.
+
+    Session-scoped because it parses two 22-page PDFs, builds a corpus, writes a
+    workbook, reads it back and draws a PDF - a few seconds, and every test here
+    is asking a different question about the same run.
+    """
+    from tests.msg_pipeline import run
+    return run(tmp_path_factory.mktemp("msg"))
+
+
+@pytest.fixture(scope="session")
+def msg_score(msg_run, msg_truth):
+    """How close that pass came, scored off the PDF it actually produced."""
+    from tests.msg import score
+    return score(msg_run.reread(), msg_truth)

@@ -138,8 +138,18 @@ SELECT d.file_name, fm.name AS form_name, fm.domain, f.field_key, f.page,
        f.text AS field_text, f.normalized_text,
        a.text AS annotation_text, a.annot_type, a.variable, a.value, a.qnam,
        -- Where the annotation was drawn. Pre-fill orders a field's set by it, so
-       -- a set comes back in the order the last study actually read it in.
+       -- a set comes back in the order the last study actually read it in - and
+       -- places it there again: `relative` and the link's offsets are the only
+       -- record of where this exact statement went, and the house style's
+       -- per-type median is a poor substitute for it.
        a.bbox AS annotation_bbox,
+       a.relative AS annotation_relative,
+       -- How it was rendered. The house style reports the corpus *mode* per
+       -- annotation type, which is the right answer for a statement nobody has
+       -- seen; for one that was seen, what it was actually drawn in is better
+       -- evidence, and it is the same argument that applies to its position.
+       a.text_color, a.fill_color, a.font_name, a.font_size,
+       l.relative_label, l.offset_x_pct, l.offset_y_pct,
        l.link_score, l.trust, f.confidence AS field_confidence
 FROM   links l
 JOIN   fields f       ON f.id = l.field_id
@@ -165,8 +175,13 @@ CREATE VIEW IF NOT EXISTS form_annotations AS
 SELECT d.file_name, fm.name AS form_name, fm.normalized_name, fm.domain,
        a.page, a.text AS annotation_text, a.annot_type, a.variable, a.value,
        -- Where it was drawn. A form's set is ordered by it, so a row of domain
-       -- headers comes back left to right, the order it was written and read in.
+       -- headers comes back left to right, the order it was written and read in
+       -- - and `relative` is what puts it back there. Form-level markup has no
+       -- field to be positioned against, so its own page position is the only
+       -- placement evidence that exists for it.
        a.bbox AS annotation_bbox,
+       a.relative AS annotation_relative,
+       a.text_color, a.fill_color, a.font_name, a.font_size,
        COALESCE(a.trust, 'GEOMETRIC') AS trust, a.confidence
 FROM   annotations a
 JOIN   forms fm     ON fm.id = a.form_id
@@ -359,7 +374,7 @@ def _annot_trust(a) -> str | None:
 
 
 def _insert_links(con, doc: Document, doc_id: int, field_ids, annot_ids) -> None:
-    from .template import relative_label
+    from .template import placement_of
     for l in doc.links:
         fid, aid = field_ids.get(l.field_id), annot_ids.get(l.annotation_id)
         if fid is None or aid is None:
@@ -367,10 +382,7 @@ def _insert_links(con, doc: Document, doc_id: int, field_ids, annot_ids) -> None
         fld, a, page = doc.field(l.field_id), doc.annotation(l.annotation_id), doc.page(l.page)
         label = offx = offy = None
         if fld and a and page:
-            w, h = page.width or 1.0, page.height or 1.0
-            label = relative_label(a, fld)
-            offx = round((a.bbox.x0 - fld.bbox.x1) / w, 4)
-            offy = round((a.bbox.cy - fld.bbox.cy) / h, 4)
+            label, offx, offy = placement_of(a.bbox, fld.bbox, page.width, page.height)
         con.execute(
             "INSERT INTO links (document_id, field_id, annotation_id, link_score,"
             " rejected, evidence, trust, relative_label, offset_x_pct, offset_y_pct)"
