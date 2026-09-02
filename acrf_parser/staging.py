@@ -31,7 +31,7 @@ importer name the one that is wrong.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field as dc_field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -43,13 +43,14 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 from . import prefill as pf
 from .models import FIELD_SCOPE, FORM_SCOPE, Document
+from .normalize import statement_key
 from .prefill import PrefillIndex, prefill_document, prefill_forms
 from .style import HouseStyle, derive_house_style
 from .template import RIGHT_OF
 
 SHEET_WORK, SHEET_GEOM = "Annotations", "Geometry"
 SHEET_STYLE, SHEET_FORMS, SHEET_README = "HouseStyle", "Forms", "Instructions"
-SHEET_FILLS = "DomainFills"
+SHEET_FILLS, SHEET_ALTS = "DomainFills", "Alternatives"
 
 STATUSES = ["AUTO", "NEEDS_REVIEW", "NEEDS_MAPPING", "APPROVED", "REJECTED"]
 
@@ -124,6 +125,13 @@ class StagingRow:
     values: dict[str, Any]
     geometry: dict[str, Any]
     annot_seq: int = 1
+    # Rival answers history had for this row's entity - another study's wording
+    # of the same markup, or a weaker tier that was not taken. Never rows on the
+    # work sheet: a row there is a promise that something gets drawn. They go to
+    # the 'Alternatives' sheet as evidence, for the agent to weigh against
+    # context this pipeline does not have. Carried on annot_seq 1 only, because
+    # an alternative is rival to the whole set, not to one statement in it.
+    alternates: list[Any] = dc_field(default_factory=list)
 
     @property
     def key(self) -> tuple[str, int]:
@@ -160,14 +168,56 @@ def build_staging(doc: Document, index: PrefillIndex | None = None,
         if page.anchor is not None:
             r = form_results.get(page.anchor.id)
             for seq, candidate in enumerate(r.annotations if r else [None], start=1):
-                rows.append(_form_row(page, page.anchor, r, candidate, seq, house))
+                row = _form_row(page, page.anchor, r, candidate, seq, house)
+                _attach_alternates(row, r if seq == 1 else None)
+                rows.append(row)
         carriers = _carriers(page, results)
         for fld in page.fields:
             r = results.get(fld.id)
             candidates = (r.annotations if r else [None]) if carriers.get(fld.id, True) else [None]
             for seq, candidate in enumerate(candidates, start=1):
-                rows.append(_row(doc, page, fld, r, candidate, seq, house))
+                row = _row(doc, page, fld, r, candidate, seq, house)
+                _attach_alternates(row, r if seq == 1 else None)
+                rows.append(row)
     return rows
+
+
+def _attach_alternates(row: StagingRow, result) -> None:
+    """Hang the row's rival answers on it, and say on the row that they exist.
+
+    Two kinds arrive as `Prefill.alternates` and both belong here: another study
+    worded this markup differently, and a weaker tier reached the same field.
+    Both are answers history had and the rule did not take.
+
+    Filtered, because an alternative that is not an alternative is noise on a
+    sheet whose whole value is that every line on it is a real decision. Two
+    tiers reaching `BRTHDTC` by different routes is one answer found twice, not
+    a choice - `statement_key` is what says so, the same word-set identity used
+    everywhere else. The same statement offered by two losing studies collapses
+    for the same reason.
+
+    The pointer goes in `match_reason` because that is the column a reviewer and
+    the agent already read for *why*, and the honest answer to "why this one" is
+    partly "because others were passed over". A row with no alternatives says
+    nothing, so the note means something when it appears.
+    """
+    if result is None or not result.alternates:
+        return
+    chosen = statement_key(row.values.get("suggested_annotation") or "")
+    seen, keep = {chosen}, []
+    for alt in result.alternates:
+        key = statement_key(alt.annotation_text or "")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        keep.append(alt)
+    if not keep:
+        return
+    row.alternates = keep
+    reason = row.values.get("match_reason") or ""
+    note = (f"{len(keep)} alternative{'' if len(keep) == 1 else 's'} in history "
+            f"- see the '{SHEET_ALTS}' sheet")
+    row.values["match_reason"] = f"{reason}; {note}" if reason else note
 
 
 def _carriers(page, results) -> dict[str, bool]:
@@ -441,6 +491,7 @@ def write_staging(doc: Document, path: str | Path, index: PrefillIndex | None = 
     _geometry_sheet(wb, rows)
     _style_sheet(wb, house)
     _fills_sheet(wb, house)
+    _alternatives_sheet(wb, rows)
     _forms_sheet(wb, doc, index or PrefillIndex())
     _readme_sheet(wb, doc, rows)
     wb.remove(wb["Sheet"]) if "Sheet" in wb.sheetnames else None
@@ -519,6 +570,76 @@ def _geometry_sheet(wb: Workbook, rows: list[StagingRow]) -> None:
     for i in range(1, len(keys) + 1):
         ws.column_dimensions[get_column_letter(i)].width = 14
     ws.freeze_panes = "B2"
+
+
+ALT_HEADERS = [
+    ("row_id", 10), ("scope", 8), ("form_name", 22), ("page", 6),
+    ("field_text", 34), ("chosen_annotation", 26), ("chosen_source", 30),
+    ("alt_annotation", 26), ("alt_variable", 16), ("alt_annot_type", 20),
+    ("alt_source", 30), ("alt_tier", 22), ("alt_score", 10), ("alt_trust", 16),
+    ("why_not_chosen", 56),
+]
+
+
+def _alternatives_sheet(wb: Workbook, rows: list[StagingRow]) -> None:
+    """Rival answers history had, and did not get. Evidence, never rows.
+
+    The deterministic rule has to pick one answer per entity, and a corpus of
+    several studies routinely holds more than one: two sponsors word the same
+    mapping differently, or a fuzzy tier reached the field after an exact one
+    did. Merging them onto the page is what put the same domain header on it
+    three times, so only one is drawn - but the losers are not wrong, they are
+    unchosen, and discarding them makes the corpus look unanimous when it was
+    not.
+
+    They cannot live on the 'Annotations' sheet. A row there is a promise: the
+    importer draws every approved row, so a rival wording sitting next to its
+    default is one careless APPROVE away from both being on the page - and a
+    human skimming a sheet where half the rows are alternatives cannot see the
+    work. So they get their own sheet, locked, keyed by `row_id` back to the row
+    they are rival to.
+
+    This is the handoff. Choosing between wordings is a semantic question about
+    a CRF this pipeline has never seen, which is the agent's job and not a
+    tie-break's. The rule picks a defensible default so nothing is ever blank;
+    the agent reads this sheet, and where it knows better it edits
+    `final_annotation` on the work sheet. The 'Instructions' sheet says so.
+
+    `chosen_annotation` is the row the alternative is filed against, which on a
+    FORM row is the *first* statement of the page's markup. The alternative is
+    rival to that whole set - one study's page against another's - not to that
+    one statement, because a page's markup is composed together or not at all.
+    """
+    ws = wb.create_sheet(SHEET_ALTS)
+    names = [h for h, _ in ALT_HEADERS]
+    ws.append(names)
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = FILL_HEADER
+        cell.alignment = Alignment(vertical="center", wrap_text=True)
+    for r in rows:
+        for alt in r.alternates:
+            ws.append([
+                r.row_id, r.values.get("scope", ""), r.values.get("form_name", ""),
+                r.values.get("page", ""), r.values.get("field_text", ""),
+                r.values.get("suggested_annotation", ""),
+                r.values.get("match_source", ""),
+                alt.annotation_text, alt.variable, alt.annot_type,
+                alt.source, alt.tier, round(alt.confidence, 3), alt.trust,
+                "; ".join(alt.evidence),
+            ])
+    for i, row in enumerate(ws.iter_rows(min_row=2), start=2):
+        for cell in row:
+            cell.protection = Protection(locked=True)
+            cell.fill = FILL_LOCKED
+            cell.alignment = Alignment(vertical="top", wrap_text=cell.column in
+                                       {names.index("field_text") + 1,
+                                        names.index("why_not_chosen") + 1})
+    for i, (_, width) in enumerate(ALT_HEADERS, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = width
+    ws.freeze_panes = "B2"
+    if ws.max_row > 1:
+        ws.auto_filter.ref = ws.dimensions
 
 
 def _style_sheet(wb: Workbook, house: HouseStyle) -> None:
@@ -646,6 +767,31 @@ def _readme_sheet(wb: Workbook, doc: Document, rows: list[StagingRow]) -> None:
         ("   files the answer where nobody will find it again.", False),
         ("6. Set status to APPROVED or REJECTED on every row before importing.", False),
         ("", False),
+        ("Reviewing the 'Alternatives' sheet", True),
+        ("- Where several past studies annotated the same thing differently, only", False),
+        ("  one answer is on the 'Annotations' sheet. It was chosen by rule -", False),
+        ("  strongest trust, then score, then the fullest record - and the rule", False),
+        ("  knows nothing about THIS study. The wordings it passed over are on the", False),
+        ("  'Alternatives' sheet, keyed by row_id to the row they are rival to.", False),
+        ("- On a FORM row the alternatives are rival to that PAGE'S WHOLE SET of", False),
+        ("  markup, not to the single statement in chosen_annotation: one study's", False),
+        ("  header-plus-constants against another's. Weigh the set, not the line.", False),
+        ("- Read that sheet. For each row_id on it, compare alt_annotation against", False),
+        ("  the chosen_annotation and decide, using context the rule does not have:", False),
+        ("  this study's protocol and SDTM conventions, the domain, sibling fields", False),
+        ("  on the same form, and which past study the alt_source names. A rival", False),
+        ("  from a study in the same therapeutic area usually beats a default that", False),
+        ("  won on a tie-break.", False),
+        ("- To take an alternative, edit final_annotation (and final_variable /", False),
+        ("  final_annot_type) on the matching 'Annotations' row, and say why in", False),
+        ("  reviewer_note. Do NOT add a row for it: the alternative REPLACES the", False),
+        ("  default, it is not a second annotation. Adding a row draws both, which", False),
+        ("  is the exact fault this sheet exists to prevent.", False),
+        ("- Leaving the default is a valid outcome and needs no edit. Alternatives", False),
+        ("  are unchosen, not wrong; most rows should keep what they arrived with.", False),
+        ("- match_reason on a row says 'see the Alternatives sheet' when that row", False),
+        ("  has any. A row without that note had exactly one answer in history.", False),
+        ("", False),
         ("Adding a second annotation to a field", True),
         ("- Copy the whole row, paste it directly beneath, and put the next free", False),
         ("  number in annot_seq (leave annot_seq blank and it will be numbered for", False),
@@ -658,6 +804,8 @@ def _readme_sheet(wb: Workbook, doc: Document, rows: list[StagingRow]) -> None:
         ("  row of a field - each field needs at least one.", False),
         ("", False),
         ("Rules", True),
+        ("- The 'Alternatives' sheet is evidence and is regenerated on export.", False),
+        ("  Edits to it are ignored on import; act on it by editing 'Annotations'.", False),
         ("- Only fill the unshaded columns. Shaded columns are evidence and are", False),
         ("  regenerated on every export; edits to them are ignored on import.", False),
         ("- Do not sort or reorder rows, and do not invent a row_id. row_id is the", False),
@@ -702,6 +850,8 @@ def summarize_staging(rows: list[StagingRow]) -> dict[str, Any]:
     form_rows = [r for r in rows if r.values.get("scope") == FORM_SCOPE]
     field_rows = [r for r in rows if r.values.get("scope") != FORM_SCOPE]
     return {"rows": len(rows), "fields": len({r.row_id for r in field_rows}),
+            "alternatives": sum(len(r.alternates) for r in rows),
+            "rows_with_alternatives": sum(1 for r in rows if r.alternates),
             "by_tier": dict(sorted(tiers.items())),
             "by_status": dict(sorted(statuses.items())),
             "auto_fill_rate": round(statuses.get("AUTO", 0) / total, 3),

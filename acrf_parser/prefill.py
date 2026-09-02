@@ -225,6 +225,11 @@ class PrefillIndex:
         # them. Keyed on the form, ordered by where it was drawn, exactly as
         # `key_sets` is - the same set-of-statements idea, one level up.
         self.form_sets: dict[str, dict[str, Candidate]] = defaultdict(dict)
+        # The studies that lost a page of a form. Never rows - `Prefill.alternates`,
+        # so the agent can see the corpus disagreed and swap a wording in.
+        self.form_alternates: dict[str, list[Candidate]] = defaultdict(list)
+        # The same, one level down: rival studies for a single field.
+        self.key_alternates: dict[tuple[str, str], list[Candidate]] = defaultdict(list)
         # domain -> the header text a study writes for it ("DS" -> "DS=Disposition").
         # Learned, not a built-in CDISC table: a sponsor that writes
         # "DS = Disposition" with spaces gets its own spacing back.
@@ -359,6 +364,7 @@ class PrefillIndex:
                     annot_type=r["annot_type"], trust=trust,
                     drawn_x=_left_edge(r.get("annotation_bbox")),
                     drawn=_drawn(r), style=_style(r),
+                    file_name=str(r.get("file_name") or ""),
                     source=f"{r['file_name']} · {r['form_name']} · {r['field_text']}",
                     evidence=[f"approved by a reviewer on {r['file_name']}" if approved
                               else f"(form, field_text) seen in {r['file_name']}"])
@@ -381,9 +387,16 @@ class PrefillIndex:
         workbook diff meaningless.
         """
         for key, statements in self.key_sets.items():
-            ranked = sorted(statements.values(),
+            # One study answers for the field, and brings its whole set. A field
+            # really does carry several statements - DSTERM *and* RFICDTC - so
+            # the set is never collapsed to one; but the set comes from one
+            # study rather than being unioned across the corpus, or two sponsors
+            # who word the same mapping differently both get drawn on it.
+            kept, lost = _one_study_wins(statements.values())
+            ranked = sorted(kept,
                             key=lambda c: (-TRUST_RANK.get(c.trust, 1), -c.confidence,
                                            c.drawn_x, c.annotation_text))
+            self.key_alternates[key].extend(lost)
             self.key_sets[key] = {statement_key(c.annotation_text): c for c in ranked}
             self.by_key[key] = ranked[0]
 
@@ -430,7 +443,18 @@ class PrefillIndex:
             if r.get("annot_type") == "DOMAIN_HEADER" and r.get("domain"):
                 self.domain_headers[str(r["domain"]).upper()][r["annotation_text"]] += 1
         for key, statements in self.form_sets.items():
-            kept = _one_study_per_statement(statements.values())
+            # One study wins each *page of the form*, not each statement. A
+            # page's markup is a set somebody composed - the header, the
+            # constants beside it, the qualifiers down the side - and the study
+            # that composed it is the one coherent answer available.
+            kept: list[Candidate] = []
+            for page in {_statement_page(c) for c in statements.values()}:
+                on_page = [c for c in statements.values() if _statement_page(c) == page]
+                won, lost = _one_study_wins(on_page)
+                won.sort(key=lambda c: (-TRUST_RANK.get(c.trust, 1), -c.confidence,
+                                        c.drawn_x, c.annotation_text))
+                kept.extend(won)
+                self.form_alternates[key].extend(lost)
             ranked = sorted(kept, key=lambda c: (_statement_page(c) or 0,
                                                  -TRUST_RANK.get(c.trust, 1), -c.confidence,
                                                  c.drawn_x, c.annotation_text))
@@ -480,8 +504,12 @@ class PrefillIndex:
             evidence=["no field in the corpus reaches this label"])
         companions = (self._companions(form_key, text_key, field_key, best)
                       if best.tier == EXACT_KEY else [])
+        # Rival *tiers* for this field, then rival *studies* for it. Both are
+        # answers to the same question that were not taken, which is what
+        # `alternates` is: evidence for the agent, never a row to be drawn.
+        rivals = found[1:] + [_fresh(c) for c in self.key_alternates.get((form_key, text_key), [])]
         return Prefill(field_id=fld.id, form_name=fld.form_name, field_text=fld.text,
-                       best=best, alternates=found[1:], companions=companions,
+                       best=best, alternates=rivals, companions=companions,
                        aliases=self._aliases(form_key, best.variable, fld.text))
 
     def _companions(self, form_key: str, text_key: str, field_key: str,
@@ -541,8 +569,13 @@ class PrefillIndex:
             seen = [c for c in seen
                     if _statement_page(c) in (None, page_offset)]
         if seen:
+            rivals = [_fresh(c) for c in self.form_alternates.get(key, [])]
+            if page_offset is not None:
+                rivals = [c for c in rivals
+                          if _statement_page(c) in (None, page_offset)]
             return Prefill(field_id=anchor.id, form_name=anchor.form_name,
                            field_text=anchor.text, best=seen[0],
+                           alternates=rivals,
                            companions=seen[1:MAX_ANNOTATIONS_PER_FORM])
 
         proposed = self._domain_header(domain or anchor.domain, form_key)
@@ -780,43 +813,54 @@ def _spot(row: dict) -> tuple[float, float] | None:
     return (round(float(x), SPOT_PCT), round(float(y), SPOT_PCT))
 
 
-def _one_study_per_statement(candidates: Iterable["Candidate"]) -> list["Candidate"]:
-    """Collapse a form's markup so one study answers for each statement.
+def _one_study_wins(candidates: Iterable["Candidate"],
+                    ) -> tuple[list["Candidate"], list["Candidate"]]:
+    """Pick the study that answers for one entity, and take its whole set.
 
-    `form_sets` keys on where a statement was drawn as well as on its text,
-    which is right: a page that says `[NOT SUBMITTED]` against three different
-    questions carries three statements, and keying on text alone would keep one.
-    But across studies that same key stops discriminating - two sponsors draw
-    `DS=Disposition` at 8% and 12% from the left, both survive, and the page
-    comes out with the header on it twice. Every form-level statement in a
-    corpus of N studies was drawn N times.
+    A corpus is evidence, not an accumulator. Three studies that annotated the
+    same thing are three opinions about how to annotate it, and the union of
+    three opinions is a page no annotator would ever have drawn - the same
+    header in three wordings, one sponsor's constants beside another's
+    qualifiers. So the ranking is over *studies*, never over statements: rank
+    the files, then take the winner's markup entire.
 
-    The signal that separates the two cases is the file. Repetition *within* one
-    study is real; repetition *across* studies is one statement seen twice. So
-    for each (statement, page of the form) one study wins and supplies its whole
-    set of positions - never a union. The winner is the one with the strongest
-    evidence: highest trust, then confidence, then the fullest record of the
-    statement, then file name so a tie is at least deterministic.
+    Taking it entire is the part that matters. Cherry-picking the best statement
+    from each study builds a set that is internally inconsistent - study A's
+    header, study B's constant, study C's qualifier, in three house styles. A
+    study that carried three statements here carried them together, and they go
+    together or not at all.
+
+    The winner is the strongest evidence, in this order:
+
+    1. **trust** - a reviewer's sign-off outranks a geometric guess, always.
+    2. **confidence** - the better link within the same trust.
+    3. **completeness** - the fuller record of this entity. A study that wrote
+       the header *and* its two constants knew more about this page than one
+       that wrote the header alone.
+    4. **file name**, first alphabetically - so an otherwise exact tie resolves
+       the same way on every run and a workbook diff stays meaningful. This last
+       one is arbitrary and admits it: the corpus records no ingestion date, and
+       "the most recent study" would be the better tie-break if it ever does.
+
+    Returns `(kept, dropped)`. The dropped are not discarded by the caller: they
+    become `Prefill.alternates` - rival answers, carried as evidence for the
+    agent to weigh, never exported as rows to be drawn.
 
     Occurrences with no file recorded are left alone, all of them. That is a
-    corpus written before this column existed, and guessing which of them are
-    the same study would lose the repetitions this exists to protect.
+    corpus written before the column existed, and guessing which of them are one
+    study would lose the repetitions the position key exists to protect.
     """
-    groups: dict[tuple, dict[str, list["Candidate"]]] = defaultdict(lambda: defaultdict(list))
+    by_file: dict[str, list["Candidate"]] = defaultdict(list)
     for c in candidates:
-        groups[(statement_key(c.annotation_text),
-                _statement_page(c))][c.file_name].append(c)
-    kept: list["Candidate"] = []
-    for by_file in groups.values():
-        if len(by_file) == 1 or "" in by_file:
-            kept.extend(c for cs in by_file.values() for c in cs)
-            continue
-        winner = max(by_file.items(),
-                     key=lambda kv: (max(TRUST_RANK.get(c.trust, 1) for c in kv[1]),
-                                     max(c.confidence for c in kv[1]),
-                                     len(kv[1]), kv[0]))
-        kept.extend(winner[1])
-    return kept
+        by_file[c.file_name].append(c)
+    if len(by_file) <= 1 or "" in by_file:
+        return [c for cs in by_file.values() for c in cs], []
+    winner, won = sorted(
+        by_file.items(),
+        key=lambda kv: (-max(TRUST_RANK.get(c.trust, 1) for c in kv[1]),
+                        -max(c.confidence for c in kv[1]),
+                        -len(kv[1]), kv[0]))[0]
+    return won, [c for f, cs in by_file.items() if f != winner for c in cs]
 
 
 def _statement_page(candidate: "Candidate") -> int | None:

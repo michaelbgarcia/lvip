@@ -227,7 +227,7 @@ def test_learned_suffixes(index):
     assert index.suffixes["stop date"]["ENDTC"] == {"AE", "MH"}
 
 
-# --- the form-level layer, across a corpus of more than one study ----------
+# --- one study wins: the corpus is evidence, not an accumulator ------------
 def _form_row(file_name, x, y, text="DS=Disposition", page_offset=0,
               trust=pf.GEOMETRIC):
     return {"file_name": file_name, "form_name": "Disposition",
@@ -245,61 +245,96 @@ def _form_index(rows):
     return idx
 
 
-def _texts(idx, form="disposition"):
-    return [c.annotation_text for c in idx.form_sets[form].values()]
+def _kept(idx, form="disposition"):
+    return list(idx.form_sets[form].values())
 
 
-def test_one_study_answers_for_a_form_level_statement():
-    """Three sponsors draw the same header at three left margins. That is one
-    header seen three times, not a page carrying three of them - the bug was a
-    page coming out with `DS=Disposition` on it once per study in the corpus."""
-    idx = _form_index([_form_row("studyA.pdf", 0.08, 0.05),
-                       _form_row("studyB.pdf", 0.12, 0.05),
-                       _form_row("studyC.pdf", 0.08, 0.07)])
-    assert _texts(idx) == ["DS=Disposition"]
+def test_one_study_wins_a_page_however_the_others_word_it():
+    """The bug: a page came out with its header on it once per study in the
+    corpus. Wording is not the axis - three sponsors saying the same thing three
+    ways is still one header, and text identity would only catch the first."""
+    idx = _form_index([_form_row("a.pdf", 0.08, 0.05, "DS=Disposition"),
+                       _form_row("b.pdf", 0.12, 0.05, "DS = Disposition Status"),
+                       _form_row("c.pdf", 0.15, 0.05, "DS=Disposition (per SDTM)")])
+    assert [c.annotation_text for c in _kept(idx)] == ["DS=Disposition"]
+    assert {c.annotation_text for c in idx.form_alternates["disposition"]} == {
+        "DS = Disposition Status", "DS=Disposition (per SDTM)"}
+
+
+def test_the_winner_brings_its_whole_page_not_the_best_of_each():
+    """Cherry-picking the strongest statement from each study builds a page in
+    three house styles that no annotator ever drew. The set goes together."""
+    idx = _form_index(
+        [_form_row("a.pdf", 0.08, 0.05, "DS=Disposition"),
+         _form_row("a.pdf", 0.08, 0.09, "DSDECOD"),
+         _form_row("a.pdf", 0.08, 0.13, "DSSTDTC"),
+         _form_row("b.pdf", 0.40, 0.05, "DS = Disposition Status"),
+         _form_row("b.pdf", 0.40, 0.09, "DSTERM")])
+    assert {c.file_name for c in _kept(idx)} == {"a.pdf"}
+    assert sorted(c.annotation_text for c in _kept(idx)) == sorted(
+        ["DS=Disposition", "DSDECOD", "DSSTDTC"])
 
 
 def test_a_statement_repeated_within_one_study_is_kept():
-    """The other half, and the reason the position is in the key at all: one
-    page saying `[NOT SUBMITTED]` against three questions carries three."""
-    idx = _form_index([_form_row("studyA.pdf", x, y, text="[NOT SUBMITTED]")
-                       for x, y in [(0.30, 0.32), (0.30, 0.55), (0.30, 0.87)]])
-    assert _texts(idx) == ["[NOT SUBMITTED]"] * 3
+    """The reason position is in the key at all: one page saying
+    `[NOT SUBMITTED]` against three questions carries three."""
+    idx = _form_index([_form_row("a.pdf", 0.30, y, text="[NOT SUBMITTED]")
+                       for y in (0.32, 0.55, 0.87)])
+    assert len(_kept(idx)) == 3
 
 
-def test_the_winning_study_supplies_the_whole_set_never_a_union():
-    """Both studies repeat the statement, at different spots. Keeping the union
-    would draw it five times; the answer is one study's three."""
-    idx = _form_index(
-        [_form_row("studyA.pdf", 0.30, y, text="[NOT SUBMITTED]")
-         for y in (0.32, 0.55, 0.87)]
-        + [_form_row("studyB.pdf", 0.44, y, text="[NOT SUBMITTED]")
-           for y in (0.20, 0.60)])
-    kept = list(idx.form_sets["disposition"].values())
-    assert len(kept) == 3
-    assert {c.file_name for c in kept} == {"studyA.pdf"}
-
-
-def test_the_most_trusted_study_wins_the_statement():
-    """Trust decides before anything else: a reviewer's sign-off is the record,
-    however many times a geometric guess repeated the statement."""
+def test_trust_outranks_everything_including_a_fuller_record():
+    """A reviewer's sign-off is the record, however much markup a geometric
+    guess piled up beside it."""
     idx = _form_index([_form_row("approved.pdf", 0.08, 0.05,
                                  trust=pf.HUMAN_APPROVED),
-                       _form_row("guessed.pdf", 0.12, 0.05),
-                       _form_row("guessed.pdf", 0.12, 0.09)])
-    kept = list(idx.form_sets["disposition"].values())
-    assert [c.file_name for c in kept] == ["approved.pdf"]
+                       _form_row("guessed.pdf", 0.40, 0.05, "DSTERM"),
+                       _form_row("guessed.pdf", 0.40, 0.09, "DSDECOD"),
+                       _form_row("guessed.pdf", 0.40, 0.13, "DSSTDTC")])
+    assert {c.file_name for c in _kept(idx)} == {"approved.pdf"}
 
 
-def test_the_same_statement_on_two_pages_of_a_form_survives():
-    """Deduping is per page of the form. A two-page questionnaire that heads
-    both pages must keep both headers, one per page."""
-    idx = _form_index([_form_row("studyA.pdf", 0.08, 0.05, page_offset=0),
-                       _form_row("studyA.pdf", 0.08, 0.05, page_offset=1),
-                       _form_row("studyB.pdf", 0.11, 0.06, page_offset=0),
-                       _form_row("studyB.pdf", 0.11, 0.06, page_offset=1)])
-    kept = list(idx.form_sets["disposition"].values())
-    assert sorted(pf._statement_page(c) for c in kept) == [0, 1]
+def test_the_fuller_record_wins_a_tie():
+    """Equal trust and equal score: the study that wrote the header *and* its
+    two constants knew more about this page than the one that wrote a header."""
+    idx = _form_index([_form_row("a.pdf", 0.08, 0.05),
+                       _form_row("z.pdf", 0.40, 0.05, "DS = Disposition Status"),
+                       _form_row("z.pdf", 0.40, 0.09, "DSDECOD")])
+    assert {c.file_name for c in _kept(idx)} == {"z.pdf"}
+
+
+def test_an_exact_tie_resolves_the_same_way_every_run():
+    """Arbitrary, but stable - a workbook diff has to mean something."""
+    rows = [_form_row("b.pdf", 0.12, 0.05, "DS = Disposition Status"),
+            _form_row("a.pdf", 0.08, 0.05, "DS=Disposition")]
+    assert ([c.file_name for c in _kept(_form_index(rows))]
+            == [c.file_name for c in _kept(_form_index(list(reversed(rows))))]
+            == ["a.pdf"])
+
+
+def test_each_page_of_a_form_is_won_separately():
+    """A two-page questionnaire heads both pages; deduping is per page."""
+    idx = _form_index([_form_row("a.pdf", 0.08, 0.05, page_offset=0),
+                       _form_row("a.pdf", 0.08, 0.05, page_offset=1),
+                       _form_row("b.pdf", 0.11, 0.06, "DS = Disposition Status",
+                                 page_offset=0)])
+    assert sorted(pf._statement_page(c) for c in _kept(idx)) == [0, 1]
+
+
+def test_the_losers_are_handed_on_as_alternates_not_dropped():
+    """The handoff. Only one answer is drawn, but discarding the rest would make
+    the corpus look unanimous when it was not - and the agent is the reader who
+    can tell which wording suits a CRF this pipeline has never seen. Where they
+    are *presented* is the workbook's business, not this layer's."""
+    from acrf_parser.models import BBox, FormAnchor
+
+    idx = _form_index([_form_row("a.pdf", 0.08, 0.05, "DS=Disposition"),
+                       _form_row("b.pdf", 0.12, 0.05, "DS = Disposition Status")])
+    anchor = FormAnchor(id="p3", form_name="Disposition", page=3,
+                        bbox=BBox.of((0, 0, 10, 10)))
+    p = idx.match_form(anchor, domain="DS", page_offset=0)
+    assert [c.annotation_text for c in p.annotations] == ["DS=Disposition"]
+    assert [c.annotation_text for c in p.alternates] == ["DS = Disposition Status"]
 
 
 def test_a_corpus_with_no_file_names_is_left_alone():
@@ -307,4 +342,52 @@ def test_a_corpus_with_no_file_names_is_left_alone():
     would lose exactly the repetitions the position key protects."""
     idx = _form_index([_form_row("", 0.30, y, text="[NOT SUBMITTED]")
                        for y in (0.32, 0.55, 0.87)])
-    assert _texts(idx) == ["[NOT SUBMITTED]"] * 3
+    assert len(_kept(idx)) == 3
+
+
+# --- the same rule, one level down: fields -------------------------------
+def _field_rows(file_name, statements, trust=pf.GEOMETRIC):
+    return [{"file_name": file_name, "form_name": "Medical History", "domain": "MH",
+             "field_key": "medical history|conditions", "field_text": "Conditions",
+             "normalized_text": "conditions", "annotation_text": t,
+             "annot_type": "VARIABLE", "variable": t.split()[0], "link_score": 0.9,
+             "trust": trust, "annotation_bbox": [200 + 40 * i, 100, 260 + 40 * i, 112],
+             "annotation_relative": {"rel_x_pct": 0.4, "rel_y_pct": 0.2,
+                                     "rel_w_pct": 0.1, "rel_h_pct": 0.02},
+             "relative_label": "", "offset_x_pct": 0.02, "offset_y_pct": 0.0,
+             "text_color": None, "fill_color": None, "font_name": None,
+             "font_size": None}
+            for i, t in enumerate(statements)]
+
+
+def test_a_field_keeps_its_set_but_from_one_study():
+    """A field really does carry several statements, so the set is never
+    collapsed to one - but two sponsors wording the same mapping differently
+    must not both be drawn on it."""
+    idx = PrefillIndex._build(_field_rows("a.pdf", ["MHTERM", "MHOCCUR"])
+                              + _field_rows("b.pdf", ["MHTERM (verbatim)",
+                                                      "MHOCCUR = Y"]))
+    kept = idx.key_sets[("medical history", "conditions")]
+    assert sorted(c.annotation_text for c in kept.values()) == ["MHOCCUR", "MHTERM"]
+    assert {c.file_name for c in kept.values()} == {"a.pdf"}
+
+
+def test_a_field_s_rival_studies_are_carried_as_alternates():
+    """Same contract as the form layer: evidence for the agent, never rows."""
+    idx = PrefillIndex._build(_field_rows("a.pdf", ["MHTERM"])
+                              + _field_rows("b.pdf", ["MHTERM (verbatim)"]))
+    r = idx.match(_field("Medical History", "Conditions"))
+    assert r.best.annotation_text == "MHTERM"
+    # `alternates` also carries rival *tiers* for the field; the rival *study*
+    # is the one this test is about.
+    assert "MHTERM (verbatim)" in [c.annotation_text for c in r.alternates]
+    assert [c.file_name for c in idx.key_alternates[
+        ("medical history", "conditions")]] == ["b.pdf"]
+
+
+def test_a_field_answered_by_one_study_gains_no_alternates():
+    """The ordinary case must not grow noise in its evidence column."""
+    idx = PrefillIndex._build(_field_rows("a.pdf", ["MHTERM", "MHOCCUR"]))
+    r = idx.match(_field("Medical History", "Conditions"))
+    assert idx.key_alternates[("medical history", "conditions")] == []
+    assert not any("differently" in e for e in r.best.evidence)

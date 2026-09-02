@@ -72,7 +72,8 @@ def _field_rows(rows):
 
 def test_sheets(book):
     assert book.sheetnames == [st.SHEET_WORK, st.SHEET_GEOM, st.SHEET_STYLE,
-                               st.SHEET_FILLS, st.SHEET_FORMS, st.SHEET_README]
+                               st.SHEET_FILLS, st.SHEET_ALTS, st.SHEET_FORMS,
+                               st.SHEET_README]
 
 
 def test_one_row_per_field(work, blank_doc):
@@ -249,3 +250,78 @@ def test_summary(blank_doc, index, house):
     s = st.summarize_staging(st.build_staging(blank_doc, index, house))
     assert s["rows"] == ALL_ROWS and s["fields"] == FIELD_ROWS
     assert s["by_status"]["AUTO"] == 9 + FORM_AUTO
+
+
+# --- the Alternatives sheet ------------------------------------------------
+@pytest.fixture(scope="session")
+def rival_book(blank_doc, corpus, house, tmp_path_factory):
+    """A corpus where a second study worded the same markup differently."""
+    import json
+
+    idx = PrefillIndex.from_documents(corpus)
+    rows = []
+    for key, statements in list(idx.form_sets.items()):
+        for c in statements.values():
+            rows.append({"file_name": "rival.pdf", "form_name": key,
+                         "normalized_name": key, "domain": "",
+                         "annotation_text": c.annotation_text + " Status",
+                         "annot_type": c.annot_type, "variable": c.variable,
+                         "annotation_bbox": [40, 40, 120, 52],
+                         "annotation_relative": json.dumps(
+                             {"rel_x_pct": 0.3, "rel_y_pct": 0.05,
+                              "rel_w_pct": 0.13, "rel_h_pct": 0.015}),
+                         "page_offset": c.drawn.get("page_offset"),
+                         "trust": pf.GEOMETRIC})
+    idx._load_form_annotations(rows)
+    path = st.write_staging(blank_doc, tmp_path_factory.mktemp("xlr") / "rival.xlsx",
+                            index=idx, house=house)
+    return load_workbook(path)
+
+
+def test_the_alternatives_sheet_exists_even_when_the_corpus_agrees(book):
+    """Header row always, so the agent's instructions never point at nothing."""
+    ws = book[st.SHEET_ALTS]
+    assert [c.value for c in ws[1]] == [h for h, _ in st.ALT_HEADERS]
+
+
+def test_rival_wordings_land_on_the_alternatives_sheet(rival_book):
+    alts = _rows(rival_book, st.SHEET_ALTS)
+    assert alts, "a disagreeing corpus must produce alternatives"
+    assert all(a["alt_annotation"] and a["alt_source"] for a in alts)
+    # Which side wins is the rule's business; that the disagreement is on the
+    # sheet is this test's. One of the two wordings is the rival.
+    assert any(a["alt_annotation"].endswith("Status")
+               or a["chosen_annotation"].endswith("Status") for a in alts)
+
+
+def test_alternatives_never_become_annotation_rows(book, rival_book):
+    """The property that matters: a rival must not be drawable. Same CRF, more
+    history, and not one extra row on the sheet the importer reads."""
+    assert len(_rows(rival_book)) == len(_rows(book)) == ALL_ROWS
+
+
+def test_an_alternative_is_keyed_back_to_the_row_it_rivals(rival_book):
+    work = {r["row_id"] for r in _rows(rival_book)}
+    alts = _rows(rival_book, st.SHEET_ALTS)
+    assert {a["row_id"] for a in alts} <= work
+    for a in alts:
+        assert a["chosen_annotation"] != a["alt_annotation"]
+
+
+def test_a_row_with_alternatives_says_so_in_its_evidence(rival_book):
+    """The pointer, so the agent knows which rows to go and look up."""
+    ids = {a["row_id"] for a in _rows(rival_book, st.SHEET_ALTS)}
+    noted = {r["row_id"] for r in _rows(rival_book)
+             if "Alternatives" in (r["match_reason"] or "")}
+    assert ids <= noted
+
+
+def test_the_alternatives_sheet_is_locked(rival_book):
+    ws = rival_book[st.SHEET_ALTS]
+    assert all(c.protection.locked for c in ws[2])
+
+
+def test_the_instructions_tell_the_agent_what_to_do_with_them(book):
+    text = "\n".join(str(r[0].value or "") for r in book[st.SHEET_README].iter_rows())
+    assert "Reviewing the 'Alternatives' sheet" in text
+    assert "REPLACES the" in text and "final_annotation" in text
