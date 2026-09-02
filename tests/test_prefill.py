@@ -225,3 +225,86 @@ def test_summary_reports_the_number_that_matters(index, blank_doc):
 def test_learned_suffixes(index):
     assert index.suffixes["start date"]["STDTC"] == {"AE", "MH"}
     assert index.suffixes["stop date"]["ENDTC"] == {"AE", "MH"}
+
+
+# --- the form-level layer, across a corpus of more than one study ----------
+def _form_row(file_name, x, y, text="DS=Disposition", page_offset=0,
+              trust=pf.GEOMETRIC):
+    return {"file_name": file_name, "form_name": "Disposition",
+            "normalized_name": "disposition", "domain": "DS",
+            "annotation_text": text, "annot_type": "DOMAIN_HEADER", "variable": "",
+            "annotation_bbox": [x * 600, y * 800, x * 600 + 80, y * 800 + 12],
+            "annotation_relative": {"rel_x_pct": x, "rel_y_pct": y,
+                                    "rel_w_pct": 0.13, "rel_h_pct": 0.015},
+            "page_offset": page_offset, "trust": trust}
+
+
+def _form_index(rows):
+    idx = PrefillIndex()
+    idx._load_form_annotations(rows)
+    return idx
+
+
+def _texts(idx, form="disposition"):
+    return [c.annotation_text for c in idx.form_sets[form].values()]
+
+
+def test_one_study_answers_for_a_form_level_statement():
+    """Three sponsors draw the same header at three left margins. That is one
+    header seen three times, not a page carrying three of them - the bug was a
+    page coming out with `DS=Disposition` on it once per study in the corpus."""
+    idx = _form_index([_form_row("studyA.pdf", 0.08, 0.05),
+                       _form_row("studyB.pdf", 0.12, 0.05),
+                       _form_row("studyC.pdf", 0.08, 0.07)])
+    assert _texts(idx) == ["DS=Disposition"]
+
+
+def test_a_statement_repeated_within_one_study_is_kept():
+    """The other half, and the reason the position is in the key at all: one
+    page saying `[NOT SUBMITTED]` against three questions carries three."""
+    idx = _form_index([_form_row("studyA.pdf", x, y, text="[NOT SUBMITTED]")
+                       for x, y in [(0.30, 0.32), (0.30, 0.55), (0.30, 0.87)]])
+    assert _texts(idx) == ["[NOT SUBMITTED]"] * 3
+
+
+def test_the_winning_study_supplies_the_whole_set_never_a_union():
+    """Both studies repeat the statement, at different spots. Keeping the union
+    would draw it five times; the answer is one study's three."""
+    idx = _form_index(
+        [_form_row("studyA.pdf", 0.30, y, text="[NOT SUBMITTED]")
+         for y in (0.32, 0.55, 0.87)]
+        + [_form_row("studyB.pdf", 0.44, y, text="[NOT SUBMITTED]")
+           for y in (0.20, 0.60)])
+    kept = list(idx.form_sets["disposition"].values())
+    assert len(kept) == 3
+    assert {c.file_name for c in kept} == {"studyA.pdf"}
+
+
+def test_the_most_trusted_study_wins_the_statement():
+    """Trust decides before anything else: a reviewer's sign-off is the record,
+    however many times a geometric guess repeated the statement."""
+    idx = _form_index([_form_row("approved.pdf", 0.08, 0.05,
+                                 trust=pf.HUMAN_APPROVED),
+                       _form_row("guessed.pdf", 0.12, 0.05),
+                       _form_row("guessed.pdf", 0.12, 0.09)])
+    kept = list(idx.form_sets["disposition"].values())
+    assert [c.file_name for c in kept] == ["approved.pdf"]
+
+
+def test_the_same_statement_on_two_pages_of_a_form_survives():
+    """Deduping is per page of the form. A two-page questionnaire that heads
+    both pages must keep both headers, one per page."""
+    idx = _form_index([_form_row("studyA.pdf", 0.08, 0.05, page_offset=0),
+                       _form_row("studyA.pdf", 0.08, 0.05, page_offset=1),
+                       _form_row("studyB.pdf", 0.11, 0.06, page_offset=0),
+                       _form_row("studyB.pdf", 0.11, 0.06, page_offset=1)])
+    kept = list(idx.form_sets["disposition"].values())
+    assert sorted(pf._statement_page(c) for c in kept) == [0, 1]
+
+
+def test_a_corpus_with_no_file_names_is_left_alone():
+    """Written before the column existed: guessing which rows are one study
+    would lose exactly the repetitions the position key protects."""
+    idx = _form_index([_form_row("", 0.30, y, text="[NOT SUBMITTED]")
+                       for y in (0.32, 0.55, 0.87)])
+    assert _texts(idx) == ["[NOT SUBMITTED]"] * 3

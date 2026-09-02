@@ -97,6 +97,12 @@ class Candidate:
     annotation_text: str = ""
     annot_type: str = ""
     source: str = ""                 # "STUDY-XYZ · Medical History · Start Date"
+    # Which CRF this occurrence was read from, on its own so it can be grouped
+    # on. `source` is for a human to read and is not reliably splittable.
+    # Form-level dedupe needs the file: two occurrences of one statement from
+    # two studies are one statement seen twice, and two from the *same* study
+    # are two statements.
+    file_name: str = ""
     trust: str = GEOMETRIC
     evidence: list[str] = dc_field(default_factory=list)
     # Where this annotation was drawn on the page it came from, as its left edge.
@@ -417,16 +423,17 @@ class PrefillIndex:
                     annot_type=r.get("annot_type") or "", trust=trust,
                     drawn_x=_left_edge(r.get("annotation_bbox")),
                     drawn=_drawn(r), style=_style(r),
+                    file_name=str(r.get("file_name") or ""),
                     source=f"{r.get('file_name', '')} · {r.get('form_name', '')}",
                     evidence=[f"form-level markup on {r.get('form_name')!r} in "
                               f"{r.get('file_name')}"])
             if r.get("annot_type") == "DOMAIN_HEADER" and r.get("domain"):
                 self.domain_headers[str(r["domain"]).upper()][r["annotation_text"]] += 1
         for key, statements in self.form_sets.items():
-            ranked = sorted(statements.values(),
-                            key=lambda c: (_statement_page(c) or 0,
-                                           -TRUST_RANK.get(c.trust, 1), -c.confidence,
-                                           c.drawn_x, c.annotation_text))
+            kept = _one_study_per_statement(statements.values())
+            ranked = sorted(kept, key=lambda c: (_statement_page(c) or 0,
+                                                 -TRUST_RANK.get(c.trust, 1), -c.confidence,
+                                                 c.drawn_x, c.annotation_text))
             self.form_sets[key] = {
                 (statement_key(c.annotation_text), _statement_page(c),
                  _spot({"annotation_relative": c.drawn})): c for c in ranked}
@@ -771,6 +778,45 @@ def _spot(row: dict) -> tuple[float, float] | None:
     if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
         return None
     return (round(float(x), SPOT_PCT), round(float(y), SPOT_PCT))
+
+
+def _one_study_per_statement(candidates: Iterable["Candidate"]) -> list["Candidate"]:
+    """Collapse a form's markup so one study answers for each statement.
+
+    `form_sets` keys on where a statement was drawn as well as on its text,
+    which is right: a page that says `[NOT SUBMITTED]` against three different
+    questions carries three statements, and keying on text alone would keep one.
+    But across studies that same key stops discriminating - two sponsors draw
+    `DS=Disposition` at 8% and 12% from the left, both survive, and the page
+    comes out with the header on it twice. Every form-level statement in a
+    corpus of N studies was drawn N times.
+
+    The signal that separates the two cases is the file. Repetition *within* one
+    study is real; repetition *across* studies is one statement seen twice. So
+    for each (statement, page of the form) one study wins and supplies its whole
+    set of positions - never a union. The winner is the one with the strongest
+    evidence: highest trust, then confidence, then the fullest record of the
+    statement, then file name so a tie is at least deterministic.
+
+    Occurrences with no file recorded are left alone, all of them. That is a
+    corpus written before this column existed, and guessing which of them are
+    the same study would lose the repetitions this exists to protect.
+    """
+    groups: dict[tuple, dict[str, list["Candidate"]]] = defaultdict(lambda: defaultdict(list))
+    for c in candidates:
+        groups[(statement_key(c.annotation_text),
+                _statement_page(c))][c.file_name].append(c)
+    kept: list["Candidate"] = []
+    for by_file in groups.values():
+        if len(by_file) == 1 or "" in by_file:
+            kept.extend(c for cs in by_file.values() for c in cs)
+            continue
+        winner = max(by_file.items(),
+                     key=lambda kv: (max(TRUST_RANK.get(c.trust, 1) for c in kv[1]),
+                                     max(c.confidence for c in kv[1]),
+                                     len(kv[1]), kv[0]))
+        kept.extend(winner[1])
+    return kept
 
 
 def _statement_page(candidate: "Candidate") -> int | None:
